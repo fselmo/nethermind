@@ -19,6 +19,7 @@ using Nethermind.Consensus.Processing;
 using Nethermind.Consensus.Rewards;
 using Nethermind.Consensus.Validators;
 using Nethermind.Core;
+using Nethermind.Core.BlockAccessLists;
 using Nethermind.Core.Exceptions;
 using Nethermind.Core.Crypto;
 using Nethermind.Core.Extensions;
@@ -691,6 +692,16 @@ public abstract class BlockchainTestBase
             {
                 byte[] rlpBytes = Bytes.FromHexString(testBlockJson.Rlp!);
                 Block suggestedBlock = Rlp.Decode<Block>(rlpBytes);
+                // The EIP-7928 list is not in the RLP; without it PrepareForProcessing
+                // never enables parallel execution, whatever --parallelExecution says.
+                if (testBlockJson.BlockAccessList is not null)
+                {
+                    // Round-trip through RLP so the block carries the list the way the
+                    // network path delivers it: encoded bytes and a cached wire hash.
+                    byte[] encoded = Rlp.Encode(BlockAccessListAccountJson.ToBlockAccessList(testBlockJson.BlockAccessList)).Bytes;
+                    suggestedBlock.BlockAccessList = Rlp.Decode<ReadOnlyBlockAccessList>(encoded);
+                    suggestedBlock.EncodedBlockAccessList = encoded;
+                }
 
                 // EEST omits blockHeader (and the parsed body fields) for invalid-block fixtures
                 // because there is no canonical header for a block that must be rejected. The

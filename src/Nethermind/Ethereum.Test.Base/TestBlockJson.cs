@@ -8,6 +8,8 @@ namespace Ethereum.Test.Base
         public TestBlockHeaderJson? BlockHeader { get; set; }
         public TestBlockHeaderJson[]? UncleHeaders { get; set; }
         public string? Rlp { get; set; }
+        // EIP-7928: the fixture carries the block access list beside the RLP.
+        public BlockAccessListAccountJson[]? BlockAccessList { get; set; }
         public LegacyTransactionJson[]? Transactions { get; set; }
         public string? ExpectException { get; set; }
 
