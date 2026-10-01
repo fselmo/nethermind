@@ -6,6 +6,7 @@ using System.Collections.Generic;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Ethereum.Test.Base;
+using Nethermind.Consensus.Processing;
 using Nethermind.Core.Specs;
 using Nethermind.Logging;
 using Nethermind.Serialization.Json;
@@ -22,6 +23,7 @@ public readonly record struct BlockchainTestsRunnerOptions(
     bool SuppressOutput = false,
     bool? ParallelExecution = null,
     bool? ParallelExecutionBatchRead = null,
+    IBlockAccessListExecutionObserver? BlockAccessListExecutionObserver = null,
     Func<bool, string?>? ProgressUpdateFactory = null);
 
 public class BlockchainTestsRunner(in BlockchainTestsRunnerOptions options, ITestSourceLoader? testsSource = null) : BlockchainTestBase, IBlockchainTestRunner
@@ -29,6 +31,7 @@ public class BlockchainTestsRunner(in BlockchainTestsRunnerOptions options, ITes
     protected override ILogManager? ComponentLogManagerOverride => _suppressOutput ? new TestLogManager(LogLevel.Error) : null;
     protected override bool? ParallelExecutionOverride => _parallelExecution;
     protected override bool? ParallelExecutionBatchReadOverride => _parallelExecutionBatchRead;
+    protected override IBlockAccessListExecutionObserver? BlockAccessListExecutionObserver => _blockAccessListExecutionObserver;
     private readonly ConsoleColor _defaultColor = Console.ForegroundColor;
     private readonly ITestSourceLoader? _testsSource = testsSource;
     private static readonly IJsonSerializer _serializer = new EthereumJsonSerializer();
@@ -42,6 +45,7 @@ public class BlockchainTestsRunner(in BlockchainTestsRunnerOptions options, ITes
     private readonly bool _suppressOutput = options.SuppressOutput;
     private readonly bool? _parallelExecution = options.ParallelExecution;
     private readonly bool? _parallelExecutionBatchRead = options.ParallelExecutionBatchRead;
+    private readonly IBlockAccessListExecutionObserver? _blockAccessListExecutionObserver = options.BlockAccessListExecutionObserver;
     private readonly Func<bool, string?>? _progressUpdateFactory = options.ProgressUpdateFactory;
 
     public BlockchainTestsRunner(ITestSourceLoader testsSource, in BlockchainTestsRunnerOptions options)
