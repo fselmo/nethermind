@@ -70,6 +70,11 @@ public abstract class BlockchainTestBase
     protected virtual bool? ParallelExecutionBatchReadOverride => null;
 
     /// <summary>
+    /// Override to be told which executor runs each block. Null means nothing is told.
+    /// </summary>
+    protected virtual IBlockAccessListExecutionObserver? BlockAccessListExecutionObserver => null;
+
+    /// <summary>
     /// Override to replace the log manager used by internal Nethermind components.
     /// Null means use the default (TestLogManager at Warn level).
     /// </summary>
@@ -186,6 +191,11 @@ public abstract class BlockchainTestBase
         if (isEngineTest || isPostMerge)
         {
             containerBuilder.AddModule(new TestMergeModule());
+        }
+
+        if (BlockAccessListExecutionObserver is { } executionObserver)
+        {
+            containerBuilder.AddSingleton(executionObserver);
         }
 
         // Seed the optional test tracer into the main processor via the BlockchainProcessor constructor.
