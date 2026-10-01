@@ -14,7 +14,7 @@ namespace Nethermind.Test.Runner;
 /// parallel executor rejected is re-run sequentially. Lines from fixtures run in parallel interleave, so
 /// each carries the block hash rather than relying on its position.
 /// </summary>
-internal sealed class BlockAccessListExecutionReport(TextWriter output) : IBlockAccessListExecutionReport
+public sealed class BlockAccessListExecutionReport(TextWriter output) : IBlockAccessListExecutionReport
 {
     public void OnExecutionPathChosen(Block block, string? sequentialReason) =>
         Write(new
