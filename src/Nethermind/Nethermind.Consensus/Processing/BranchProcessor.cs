@@ -25,7 +25,8 @@ public class BranchProcessor(
     IBlockhashProvider blockhashProvider,
     IInclusionListSatisfactionChecker inclusionListSatisfactionChecker,
     ILogManager logManager,
-    IBlockCachePreWarmer? preWarmer = null)
+    IBlockCachePreWarmer? preWarmer = null,
+    IBlockAccessListExecutionObserver? executionObserver = null)
     : IBranchProcessor
 {
     private readonly ILogger _logger = logManager.GetClassLogger<BranchProcessor>();
@@ -143,7 +144,7 @@ public class BranchProcessor(
                 {
                     (processedBlock, receipts) = blockProcessor.ProcessOne(suggestedBlock, blockOptions, blockTracer, spec, token);
                 }
-                catch (BlockProcessor.BlockAccessListSequentialRetryException) when (
+                catch (BlockProcessor.BlockAccessListSequentialRetryException retry) when (
                     worldStateCloser is not null &&
                     !blockOptions.ContainsFlag(ProcessingOptions.ForceSequentialBlockAccessList))
                 {
@@ -153,7 +154,18 @@ public class BranchProcessor(
                     worldStateCloser.Dispose();
                     worldStateCloser = BeginTargetScope(suggestedBlock);
                     ProcessingOptions retryOptions = blockOptions | ProcessingOptions.ForceSequentialBlockAccessList;
-                    (processedBlock, receipts) = blockProcessor.ProcessOne(suggestedBlock, retryOptions, blockTracer, spec, token);
+                    Exception parallelError = retry.InnerException ?? retry;
+                    try
+                    {
+                        (processedBlock, receipts) = blockProcessor.ProcessOne(suggestedBlock, retryOptions, blockTracer, spec, token);
+                    }
+                    catch (Exception sequentialError) when (executionObserver is not null)
+                    {
+                        executionObserver.OnSequentialRetry(suggestedBlock, parallelError, sequentialError);
+                        throw;
+                    }
+
+                    executionObserver?.OnSequentialRetry(suggestedBlock, parallelError, null);
                 }
 
                 // Block is processed, ensure background tasks are cancelled (may already be via TransactionsExecuted event)

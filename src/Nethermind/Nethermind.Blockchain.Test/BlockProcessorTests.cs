@@ -2183,8 +2183,10 @@ public partial class BlockProcessorTests
     [TestCase(false, 1)]
     public async Task BranchProcessor_retries_only_parallel_bal_failures(bool retryable, int expectedAttempts)
     {
-        using BasicTestBlockchain chain = await BasicTestBlockchain.Create(builder =>
-            builder.AddDecorator<IBlockProcessor>((context, inner) =>
+        RecordingExecutionObserver observer = new();
+        using BasicTestBlockchain chain = await BasicTestBlockchain.Create(builder => builder
+            .AddSingleton<IBlockAccessListExecutionObserver>(observer)
+            .AddDecorator<IBlockProcessor>((context, inner) =>
                 new BalFailureBlockProcessor(inner, context.Resolve<IWorldState>(), retryable)));
         BalFailureBlockProcessor processor = (BalFailureBlockProcessor)chain.BlockProcessor;
         Block parent = chain.BlockTree.Head!;
@@ -2209,6 +2211,17 @@ public partial class BlockProcessorTests
         }
 
         Assert.That(processor.Attempts, Is.EqualTo(expectedAttempts));
+        Assert.That(observer.Retries, Has.Count.EqualTo(expectedAttempts - 1), "only a retried block is reported");
+        if (retryable)
+        {
+            (Block retried, Exception parallelError, Exception? sequentialError) = observer.Retries[0];
+            using (Assert.EnterMultipleScope())
+            {
+                Assert.That(retried.Hash, Is.EqualTo(block.Hash));
+                Assert.That(parallelError, Is.InstanceOf<BlockAccessListBasedWorldState.InvalidBlockLevelAccessListException>());
+                Assert.That(sequentialError, Is.Null, "the sequential re-run accepted the block");
+            }
+        }
     }
 
     [Test]
@@ -3897,7 +3910,12 @@ public partial class BlockProcessorTests
     {
         public List<(Block Block, string? Reason)> Paths { get; } = [];
 
+        public List<(Block Block, Exception ParallelError, Exception? SequentialError)> Retries { get; } = [];
+
         public void OnExecutionPathChosen(Block block, string? sequentialReason) => Paths.Add((block, sequentialReason));
+
+        public void OnSequentialRetry(Block block, Exception parallelError, Exception? sequentialError) =>
+            Retries.Add((block, parallelError, sequentialError));
     }
 
     private sealed class ProcessingOptionsRecordingBlockProcessor(IBlockProcessor inner) : IBlockProcessor
