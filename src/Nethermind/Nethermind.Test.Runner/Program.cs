@@ -72,6 +72,9 @@ internal class Program
         public static Option<bool> JsonOutput { get; } =
             new("--jsonout", "-j") { Description = "Output results as JSON array instead of human-readable format." };
 
+        public static Option<bool> JsonLines { get; } =
+            new("--jsonl") { Description = "Output results as one JSON object per line instead of a JSON array." };
+
         public static Option<int> Workers { get; } =
             new("--workers", "-p") { Description = "Number of parallel workers for processing fixture files.", DefaultValueFactory = _ => 1 };
 
@@ -113,6 +116,7 @@ internal class Program
             Options.GnosisTest,
             Options.EnableWarmup,
             Options.JsonOutput,
+            Options.JsonLines,
             Options.Workers,
             Options.Chunk,
             Options.TrieDb,
@@ -173,6 +177,7 @@ internal class Program
 
         ulong chainId = parseResult.GetValue(Options.GnosisTest) ? GnosisSpecProvider.Instance.ChainId : MainnetSpecProvider.Instance.ChainId;
         bool jsonOutput = parseResult.GetValue(Options.JsonOutput);
+        bool jsonLines = parseResult.GetValue(Options.JsonLines);
         int workers = Math.Max(1, parseResult.GetValue(Options.Workers));
         string filter = parseResult.GetValue(Options.Filter);
         string chunk = parseResult.GetValue(Options.Chunk);
@@ -222,22 +227,22 @@ internal class Program
                     ParallelExecutionBatchRead: batchRead,
                     BlockAccessListExecutionObserver: new BlockAccessListExecutionReport(Console.Error));
                 List<EthereumTestResult> results = await RunBlockTestFiles(files, runnerOptions, workers);
-                resultsOut.Write(_serializer.Serialize(results, true));
+                WriteResults(resultsOut, results, jsonLines);
             }
             else if (isStateTest)
             {
                 List<EthereumTestResult> results = RunStateTestFiles(files, whenTrace, traceMemory, !excludeStack, chainId, filter, enableWarmup, workers);
-                resultsOut.Write(_serializer.Serialize(results, true));
+                WriteResults(resultsOut, results, jsonLines);
             }
             else if (isTxTest)
             {
                 List<EthereumTestResult> results = RunTransactionTestFiles(files, filter, workers);
-                resultsOut.Write(_serializer.Serialize(results, true));
+                WriteResults(resultsOut, results, jsonLines);
             }
             else if (isZkEvmTest)
             {
                 List<EthereumTestResult> results = RunZkEvmTestFiles(files, filter, workers);
-                resultsOut.Write(_serializer.Serialize(results, true));
+                WriteResults(resultsOut, results, jsonLines);
             }
 
             if (!parseResult.GetValue(Options.Stdin)) break;
@@ -247,6 +252,20 @@ internal class Program
         if (parseResult.GetValue(Options.Wait)) Console.ReadLine();
 
         return 0;
+    }
+
+    private static void WriteResults(TextWriter output, List<EthereumTestResult> results, bool jsonLines)
+    {
+        if (!jsonLines)
+        {
+            output.Write(_serializer.Serialize(results, true));
+            return;
+        }
+
+        foreach (EthereumTestResult result in results)
+        {
+            output.WriteLine(_serializer.Serialize(result));
+        }
     }
 
     private static List<string> CollectFiles(string path, string? chunk = null)

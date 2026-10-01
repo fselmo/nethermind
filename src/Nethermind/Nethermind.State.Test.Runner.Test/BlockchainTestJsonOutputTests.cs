@@ -75,6 +75,17 @@ public class BlockchainTestJsonOutputTests
         Assert.That(ResultCount(stdout), Is.EqualTo(1), $"stdout was: {Trim(stdout)}");
     }
 
+    [Test]
+    public async Task Jsonl_writes_one_parseable_result_per_line()
+    {
+        (string stdout, _) = await RunNethtest(WriteFixture(), "--blockTest", "--jsonl");
+
+        string[] lines = stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        Assert.That(lines, Has.Length.EqualTo(1), $"stdout was: {Trim(stdout)}");
+        using JsonDocument result = JsonDocument.Parse(lines[0]);
+        Assert.That(result.RootElement.GetProperty("name").GetString(), Is.EqualTo("more_than_8_differences"));
+    }
+
     private static int ResultCount(string stdout)
     {
         using JsonDocument document = JsonDocument.Parse(stdout);
@@ -84,14 +95,14 @@ public class BlockchainTestJsonOutputTests
     private static string Trim(string output) => output.Length <= 200 ? output : $"{output[..200]}...";
 
     /// <summary>Runs the built nethtest binary over a fixture the way the nethtest workflow does.</summary>
-    private static async Task<(string Stdout, string Stderr)> RunNethtest(string fixture, string testType = "--blockTest")
+    private static async Task<(string Stdout, string Stderr)> RunNethtest(string fixture, string testType = "--blockTest", params string[] extraArgs)
     {
         string executable = Path.Combine(AppContext.BaseDirectory, OperatingSystem.IsWindows() ? "nethtest.exe" : "nethtest");
         Assert.That(File.Exists(executable), $"nethtest was not built next to the tests at {executable}");
 
         using Process process = new()
         {
-            StartInfo = new ProcessStartInfo(executable, [testType, "--input", fixture, "--jsonout", "--neverTrace"])
+            StartInfo = new ProcessStartInfo(executable, [testType, "--input", fixture, "--jsonout", "--neverTrace", .. extraArgs])
             {
                 RedirectStandardOutput = true,
                 RedirectStandardError = true
