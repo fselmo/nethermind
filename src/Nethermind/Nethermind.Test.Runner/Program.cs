@@ -4,6 +4,7 @@
 using System;
 using System.Collections.Generic;
 using System.CommandLine;
+using System.CommandLine.Help;
 using System.IO;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -119,27 +120,47 @@ internal class Program
             Options.BatchRead,
             Options.ForkAlias,
         ];
-        rootCommand.SetAction(Run);
+        rootCommand.SetAction((parseResult, cancellationToken) => Run(parseResult, null, cancellationToken));
+
+        // The names other clients' runners answer to, each the same as its option: `nethtest blocktest -i ...`.
+        foreach ((string name, Option<bool> testType) in StandardCommands)
+        {
+            Command command = new(name, testType.Description);
+            command.SetAction((parseResult, cancellationToken) => Run(parseResult, testType, cancellationToken));
+            rootCommand.Subcommands.Add(command);
+        }
+
+        foreach (Option option in rootCommand.Options)
+        {
+            if (option is not HelpOption and not VersionOption) option.Recursive = true;
+        }
 
         return await rootCommand.Parse(args).InvokeAsync();
     }
 
-    private static async Task<int> Run(ParseResult parseResult, CancellationToken cancellationToken)
+    private static readonly (string Name, Option<bool> TestType)[] StandardCommands =
+    [
+        ("blocktest", Options.BlockTest),
+        ("enginetest", Options.EngineTest),
+        ("statetest", Options.StateTest),
+    ];
+
+    private static async Task<int> Run(ParseResult parseResult, Option<bool>? command, CancellationToken cancellationToken)
     {
         // stdout carries only the results document, so every other writer goes to stderr.
         TextWriter resultsOut = Console.Out;
         Console.SetOut(Console.Error);
 
-        bool isStateTest = parseResult.GetValue(Options.StateTest);
-        bool isBlockTest = parseResult.GetValue(Options.BlockTest);
-        bool isEngineTest = parseResult.GetValue(Options.EngineTest);
+        bool isStateTest = parseResult.GetValue(Options.StateTest) || command == Options.StateTest;
+        bool isBlockTest = parseResult.GetValue(Options.BlockTest) || command == Options.BlockTest;
+        bool isEngineTest = parseResult.GetValue(Options.EngineTest) || command == Options.EngineTest;
         bool isTxTest = parseResult.GetValue(Options.TxTest);
         bool isZkEvmTest = parseResult.GetValue(Options.ZkEvmTest);
 
         int testTypeCount = (isStateTest ? 1 : 0) + (isBlockTest ? 1 : 0) + (isEngineTest ? 1 : 0) + (isTxTest ? 1 : 0) + (isZkEvmTest ? 1 : 0);
         if (testTypeCount != 1)
         {
-            Console.WriteLine("Please specify one of: --stateTest, --blockTest, --engineTest, --txTest, or --zkevmTest");
+            Console.WriteLine("Please specify one of: blocktest, enginetest, statetest, --stateTest, --blockTest, --engineTest, --txTest, or --zkevmTest");
             return 1;
         }
 
