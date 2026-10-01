@@ -193,9 +193,11 @@ public abstract class BlockchainTestBase
             containerBuilder.AddModule(new TestMergeModule());
         }
 
+        // Blocks whose delivered access list the runner dropped; filled before any block is suggested.
+        HashSet<Hash256> droppedAccessLists = [];
         if (BlockAccessListExecutionObserver is { } executionReport)
         {
-            SequentialRetryReport retryReport = new(executionReport);
+            SequentialRetryReport retryReport = new(new DroppedAccessListObserver(executionReport, droppedAccessLists));
             containerBuilder
                 .AddSingleton<IBlockAccessListExecutionObserver>(retryReport)
                 .AddDecorator<IBlockProcessor>((_, processor) => retryReport.Decorate(processor));
@@ -281,7 +283,7 @@ public abstract class BlockchainTestBase
                     if (args.ProcessingResult != ProcessingResult.Success)
                         asyncBlockError = args.Message ?? args.Exception?.Message;
                 };
-                Result<BlockHeader> suggestResult = SuggestBlocks(test, failOnInvalidRlp, blockValidator, blockTree, parentHeader);
+                Result<BlockHeader> suggestResult = SuggestBlocks(test, failOnInvalidRlp, blockValidator, blockTree, parentHeader, droppedAccessLists);
                 parentHeader = suggestResult.Data!;
                 lastValidationError = suggestResult.Error;
             }
@@ -370,10 +372,10 @@ public abstract class BlockchainTestBase
     /// block was rejected, the rejection message in <see cref="Result{TData}.Error"/> (the header
     /// is still populated — rejection of an expected-invalid block does not fail the test).
     /// </returns>
-    private static Result<BlockHeader> SuggestBlocks(BlockchainTest test, bool failOnInvalidRlp, IBlockValidator blockValidator, IBlockTree blockTree, BlockHeader parentHeader)
+    private static Result<BlockHeader> SuggestBlocks(BlockchainTest test, bool failOnInvalidRlp, IBlockValidator blockValidator, IBlockTree blockTree, BlockHeader parentHeader, ISet<Hash256> droppedAccessLists)
     {
         string? lastBlockError = null;
-        List<(Block Block, string ExpectedException)> correctRlp = DecodeRlps(test, failOnInvalidRlp);
+        List<(Block Block, string ExpectedException)> correctRlp = DecodeRlps(test, failOnInvalidRlp, droppedAccessLists);
         for (int i = 0; i < correctRlp.Count; i++)
         {
             // Setting IsPostMerge here would bypass PoSSwitcher and hide divergences
@@ -835,7 +837,7 @@ public abstract class BlockchainTestBase
         Assert.That(((IResultWrapper)response).Result.ResultType, Is.EqualTo(ResultType.Success));
     }
 
-    private static List<(Block Block, string ExpectedException)> DecodeRlps(BlockchainTest test, bool failOnInvalidRlp)
+    private static List<(Block Block, string ExpectedException)> DecodeRlps(BlockchainTest test, bool failOnInvalidRlp, ISet<Hash256> droppedAccessLists)
     {
         List<(Block Block, string ExpectedException)> correctRlp = [];
         for (int i = 0; i < test.Blocks!.Length; i++)
@@ -845,6 +847,14 @@ public abstract class BlockchainTestBase
             {
                 byte[] rlpBytes = Bytes.FromHexString(testBlockJson.Rlp!);
                 Block suggestedBlock = Rlp.Decode<Block>(rlpBytes);
+                // The list travels beside the block, as it does over the network, so a list that does not match
+                // the header is dropped as the client's sync drops a peer's. One the header commits to but the
+                // decoder rejects throws here, and the block is invalid.
+                if (testBlockJson.DeliveredBlockAccessList is { } accessList
+                    && !BlockAccessListAccountJson.TryDeliver(suggestedBlock, accessList))
+                {
+                    droppedAccessLists.Add(suggestedBlock.Hash!);
+                }
 
                 // EEST omits blockHeader (and the parsed body fields) for invalid-block fixtures
                 // because there is no canonical header for a block that must be rejected. The
@@ -1138,5 +1148,23 @@ public abstract class BlockchainTestBase
             differences.Add($"witness {section} (block {blockHash}) at index {i}: expected 0x{Bytes.FromHexString(expected![i]).ToHexString()}, none produced");
         for (int i = common; i < actual.Count; i++)
             differences.Add($"witness {section} (block {blockHash}) at index {i}: produced 0x{actual[i].ToHexString()}, none expected");
+    }
+
+    /// <summary>
+    /// Reports a block whose delivered list the runner dropped with the reason <c>bad-access-list</c>, ahead of any
+    /// reason the node gives, <c>disabled</c> included. Such a block has no list, so it never runs in parallel here.
+    /// </summary>
+    /// <remarks>Built per test, so a dropped list in one fixture never relabels the same block in another.</remarks>
+    public sealed class DroppedAccessListObserver(IBlockAccessListExecutionReport inner, IReadOnlySet<Hash256> droppedAccessLists)
+        : IBlockAccessListExecutionReport
+    {
+        public void OnExecutionPathChosen(Block block, string? sequentialReason) =>
+            inner.OnExecutionPathChosen(block,
+                sequentialReason is not null && block.Hash is { } hash && droppedAccessLists.Contains(hash)
+                    ? "bad-access-list"
+                    : sequentialReason);
+
+        public void OnSequentialRetry(Block block, Exception parallelError, Exception? sequentialError) =>
+            inner.OnSequentialRetry(block, parallelError, sequentialError);
     }
 }
