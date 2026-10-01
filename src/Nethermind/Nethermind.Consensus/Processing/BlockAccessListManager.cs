@@ -44,7 +44,8 @@ public partial class BlockAccessListManager(
     BalTxProcessorFactory txProcessorFactory,
     PrewarmerEnvFactory? prewarmerEnvFactory = null,
     PreBlockCaches? preBlockCaches = null,
-    IReadOnlyTxProcessingEnvFactory? readOnlyTxProcessingEnvFactory = null)
+    IReadOnlyTxProcessingEnvFactory? readOnlyTxProcessingEnvFactory = null,
+    IBlockAccessListExecutionObserver? executionObserver = null)
     : IBlockAccessListManager, IDisposable
 {
     private readonly ILogger _logger = logManager.GetClassLogger<BlockAccessListManager>();
@@ -136,6 +137,11 @@ public partial class BlockAccessListManager(
             && stateProvider.IsInScope
             && _hasParentReaderPool;
 
+        if (executionObserver is not null && !suggestedBlock.IsGenesis)
+        {
+            executionObserver.OnExecutionPathChosen(suggestedBlock, ParallelExecutionEnabled ? null : SequentialExecutionReason(suggestedBlock, options));
+        }
+
         // BAL-driven read warming: mirrors BlockCachePreWarmer.IsBalReadWarmingEnabled so
         // HintBal honours the same opt-in config as the prewarmer path.
         BatchReadEnabled = Enabled && blocksConfig.ParallelExecutionBatchRead;
@@ -168,6 +174,17 @@ public partial class BlockAccessListManager(
 
         _balWarmupTask = StartBalReadWarmup(suggestedBlock);
     }
+
+    /// <summary>Names the first condition of <see cref="ParallelExecutionEnabled"/> that fails, in the order <see cref="PrepareForProcessing"/> checks them.</summary>
+    private string SequentialExecutionReason(Block suggestedBlock, ProcessingOptions options) =>
+        !ExecutionFlags.ParallelExecution ? "single-threaded"
+        : !_blockAccessListsEnabled ? "pre-amsterdam"
+        : !blocksConfig.ParallelExecution ? "disabled"
+        : options.ContainsFlag(ProcessingOptions.ForceSequentialBlockAccessList) ? "forced"
+        : _isBuilding ? "building"
+        : suggestedBlock.BlockAccessList is null ? "no-access-list"
+        : !stateProvider.IsInScope ? "no-scope"
+        : "no-reader-pool";
 
     // Only the parallel executor drains the hint; sequential execution contends with the warming reads.
     private Task? StartBalReadWarmup(Block suggestedBlock)
