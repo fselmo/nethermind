@@ -198,7 +198,8 @@ internal class Program
                     JsonOutput: true,
                     SuppressOutput: true,
                     ParallelExecution: parallelExecution,
-                    ParallelExecutionBatchRead: batchRead);
+                    ParallelExecutionBatchRead: batchRead,
+                    BlockAccessListExecutionObserver: new BlockAccessListExecutionReport(Console.Error));
                 List<EthereumTestResult> results = await RunBlockTestFiles(files, runnerOptions, workers);
                 resultsOut.Write(_serializer.Serialize(results, true));
             }
