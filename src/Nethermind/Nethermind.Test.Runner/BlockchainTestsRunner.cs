@@ -86,7 +86,7 @@ public class BlockchainTestsRunner(in BlockchainTestsRunnerOptions options, ITes
     private async Task<EthereumTestResult?> ExecuteTestAsync(EthereumTest loadedTest)
     {
         if (loadedTest is FailedToLoadTest)
-            return new EthereumTestResult(loadedTest.Name, loadedTest.LoadFailure);
+            return new EthereumTestResult(loadedTest.Name, loadedTest.LoadFailure) { Rejections = [] };
 
         if (loadedTest is not BlockchainTest test)
             return null;
@@ -95,14 +95,16 @@ public class BlockchainTestsRunner(in BlockchainTestsRunnerOptions options, ITes
             return null;
 
         if (test.LoadFailure is not null)
-            return new EthereumTestResult(test.Name, test.LoadFailure);
+            return new EthereumTestResult(test.Name, test.LoadFailure) { Rejections = [] };
 
         test.ChainId = _chainId;
+        // Kept outside the run so a test that throws still reports what was rejected before it did.
+        List<BlockRejection> rejections = [];
 
         try
         {
             if (!_trace)
-                return await RunTest(test);
+                return await RunTest(test, rejections: rejections);
 
             ISpecProvider specProvider = CreateSpecProvider(test);
             // Intentionally created per test: each test emits an independent JSONL trace,
@@ -111,11 +113,11 @@ public class BlockchainTestsRunner(in BlockchainTestsRunnerOptions options, ITes
                 new() { EnableMemory = _traceMemory, DisableStack = _excludeStack },
                 specProvider);
 
-            return await RunTest(test, tracer: tracer, specProvider: specProvider);
+            return await RunTest(test, tracer: tracer, specProvider: specProvider, rejections: rejections);
         }
         catch (Exception ex)
         {
-            return new EthereumTestResult(test.Name, test.ForkName, ex.ToString());
+            return new EthereumTestResult(test.Name, test.ForkName, ex.ToString()) { Rejections = rejections };
         }
     }
 
