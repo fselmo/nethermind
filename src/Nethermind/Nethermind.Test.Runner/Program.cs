@@ -24,8 +24,11 @@ internal class Program
 
     public class Options
     {
+        public static Argument<string[]> Paths { get; } =
+            new("path") { Description = "Test input files or directories, run together as one batch.", Arity = ArgumentArity.ZeroOrMore };
+
         public static Option<string> Input { get; } =
-            new("--input", "-i") { Description = "Set the test input file or directory." };
+            new("--input", "-i") { Description = "Set the test input file or directory; runs together with any <path> arguments." };
 
         public static Option<string> Filter { get; } =
             new("--run", "--filter", "-f") { Description = "Run only those tests matching the regular expression." };
@@ -61,7 +64,7 @@ internal class Program
             new("--wait", "-w") { Description = "Wait for input after the test run." };
 
         public static Option<bool> Stdin { get; } =
-            new("--stdin", "-x") { Description = "If stdin is used, the runner will read inputs (filenames) from stdin, and continue executing until empty line is read." };
+            new("--stdin", "-x") { Description = "If stdin is used, the runner will read inputs (filenames) from stdin, and continue executing until empty line is read. Each line gets its own results document, after the one for any <path> arguments." };
 
         public static Option<bool> GnosisTest { get; } =
             new("--gnosisTest", "-g") { Description = "Set test as gnosisTest. if not, it will be by default assumed a mainnet test." };
@@ -126,10 +129,10 @@ internal class Program
         ];
         rootCommand.SetAction((parseResult, cancellationToken) => Run(parseResult, null, cancellationToken));
 
-        // The names other clients' runners answer to, each the same as its option: `nethtest blocktest -i ...`.
+        // The names other clients' runners answer to, each the same as its option: `nethtest blocktest <path>...`.
         foreach ((string name, Option<bool> testType) in StandardCommands)
         {
-            Command command = new(name, testType.Description);
+            Command command = new(name, testType.Description) { Options.Paths };
             command.SetAction((parseResult, cancellationToken) => Run(parseResult, testType, cancellationToken));
             rootCommand.Subcommands.Add(command);
         }
@@ -172,8 +175,11 @@ internal class Program
         if (parseResult.GetValue(Options.TraceNever)) whenTrace = WhenTrace.Never;
         if (parseResult.GetValue(Options.TraceAlways)) whenTrace = WhenTrace.Always;
 
-        string input = parseResult.GetValue(Options.Input);
-        if (parseResult.GetValue(Options.Stdin)) input = Console.ReadLine();
+        List<string> inputs = [];
+        if (parseResult.GetValue(Options.Input) is { } inputOption) inputs.Add(inputOption);
+        inputs.AddRange(parseResult.GetValue(Options.Paths) ?? []);
+        bool readStdin = parseResult.GetValue(Options.Stdin);
+        if (inputs.Count == 0 && readStdin) inputs = NextStdinInput();
 
         ulong chainId = parseResult.GetValue(Options.GnosisTest) ? GnosisSpecProvider.Instance.ChainId : MainnetSpecProvider.Instance.ChainId;
         bool jsonOutput = parseResult.GetValue(Options.JsonOutput);
@@ -207,9 +213,9 @@ internal class Program
             ThreadPool.SetMinThreads(desiredMin, desiredMinIO);
         }
 
-        while (!string.IsNullOrWhiteSpace(input))
+        while (inputs.Count > 0)
         {
-            List<string> files = CollectFiles(input, chunk);
+            List<string> files = CollectFiles(inputs, chunk);
 
             if (isEngineTest || isBlockTest)
             {
@@ -245,8 +251,8 @@ internal class Program
                 resultsOut.Write(_serializer.Serialize(results, true));
             }
 
-            if (!parseResult.GetValue(Options.Stdin)) break;
-            input = Console.ReadLine();
+            if (!readStdin) break;
+            inputs = NextStdinInput();
         }
 
         if (parseResult.GetValue(Options.Wait)) Console.ReadLine();
@@ -254,24 +260,33 @@ internal class Program
         return 0;
     }
 
-    private static List<string> CollectFiles(string path, string? chunk = null)
+    /// <summary>Reads the next path from stdin; an empty list once stdin ends or yields a blank line.</summary>
+    private static List<string> NextStdinInput() =>
+        Console.ReadLine() is { } line && !string.IsNullOrWhiteSpace(line) ? [line] : [];
+
+    private static List<string> CollectFiles(List<string> paths, string? chunk = null)
     {
         List<string> result = [];
-        if (File.Exists(path))
+        foreach (string path in paths)
         {
-            result.Add(path);
-        }
-        else if (Directory.Exists(path))
-        {
-            foreach (string file in Directory.GetFiles(path, "*.json", SearchOption.AllDirectories))
+            if (File.Exists(path))
             {
-                if (!file.Contains("/.meta/") && !file.Contains("\\.meta\\"))
-                    result.Add(file);
+                result.Add(path);
             }
+            else if (Directory.Exists(path))
+            {
+                List<string> directoryFiles = [];
+                foreach (string file in Directory.GetFiles(path, "*.json", SearchOption.AllDirectories))
+                {
+                    if (!file.Contains("/.meta/") && !file.Contains("\\.meta\\"))
+                        directoryFiles.Add(file);
+                }
 
-            // Sorted before chunking so every chunk job sees the same order and the
-            // interleaved NofM partition is deterministic across CI jobs.
-            result.Sort(StringComparer.Ordinal);
+                // Sorted before chunking so every chunk job sees the same order and the
+                // interleaved NofM partition is deterministic across CI jobs.
+                directoryFiles.Sort(StringComparer.Ordinal);
+                result.AddRange(directoryFiles);
+            }
         }
 
         return string.IsNullOrEmpty(chunk) ? result : [.. TestChunkFilter.FilterByChunk(result, chunk)];
