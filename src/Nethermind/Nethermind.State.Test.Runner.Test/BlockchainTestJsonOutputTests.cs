@@ -14,6 +14,7 @@ using Nethermind.Core.Crypto;
 using Nethermind.Core.Extensions;
 using Nethermind.Serialization.Json;
 using Nethermind.Serialization.Rlp;
+using Nethermind.Specs.Forks;
 using NUnit.Framework;
 
 namespace Nethermind.State.Test.Runner.Test;
@@ -74,6 +75,31 @@ public class BlockchainTestJsonOutputTests
         Assert.That(ResultCount(stdout), Is.EqualTo(1), $"stdout was: {Trim(stdout)}");
     }
 
+    [Test]
+    public async Task Bal_report_prints_one_execution_line_per_block([Values("blocktest", "--blockTest")] string testType)
+    {
+        (string fixture, string blockHash) = WriteOneBlockFixture();
+        (string stdout, string stderr) = await RunNethtest(fixture, testType, "--bal-report");
+
+        Assert.That(ResultCount(stdout), Is.EqualTo(1), $"stdout was: {Trim(stdout)}");
+        Assert.That(EventLines(stderr), Is.EqualTo(new[]
+        {
+            $$"""{"event":"balExecution","block":1,"hash":"{{blockHash}}","path":"sequential","reason":"pre-amsterdam"}""",
+        }), $"stderr was: {Trim(stderr)}");
+    }
+
+    [Test]
+    public async Task Without_bal_report_no_event_line_is_printed()
+    {
+        (string stdout, string stderr) = await RunNethtest(WriteOneBlockFixture().Path, "blocktest");
+
+        Assert.That(ResultCount(stdout), Is.EqualTo(1), $"stdout was: {Trim(stdout)}");
+        Assert.That(EventLines(stderr), Is.Empty, $"stderr was: {Trim(stderr)}");
+    }
+
+    private static string[] EventLines(string stderr) =>
+        Array.FindAll(stderr.Split('\n', StringSplitOptions.RemoveEmptyEntries), static line => line.StartsWith("{\"event\""));
+
     private static int ResultCount(string stdout)
     {
         using JsonDocument document = JsonDocument.Parse(stdout);
@@ -83,14 +109,14 @@ public class BlockchainTestJsonOutputTests
     private static string Trim(string output) => output.Length <= 200 ? output : $"{output[..200]}...";
 
     /// <summary>Runs the built nethtest binary over a fixture the way the nethtest workflow does.</summary>
-    private static async Task<(string Stdout, string Stderr)> RunNethtest(string fixture, string testType = "--blockTest")
+    private static async Task<(string Stdout, string Stderr)> RunNethtest(string fixture, string testType = "--blockTest", params string[] extraArgs)
     {
         string executable = Path.Combine(AppContext.BaseDirectory, OperatingSystem.IsWindows() ? "nethtest.exe" : "nethtest");
         Assert.That(File.Exists(executable), $"nethtest was not built next to the tests at {executable}");
 
         using Process process = new()
         {
-            StartInfo = new ProcessStartInfo(executable, [testType, "--input", fixture, "--jsonout", "--neverTrace"])
+            StartInfo = new ProcessStartInfo(executable, [testType, "--input", fixture, "--jsonout", "--neverTrace", .. extraArgs])
             {
                 RedirectStandardOutput = true,
                 RedirectStandardError = true
@@ -141,6 +167,43 @@ public class BlockchainTestJsonOutputTests
         return file;
     }
 
+    /// <summary>Writes a passing Paris fixture with one empty block, which the runner executes and so reports.</summary>
+    private (string Path, string BlockHash) WriteOneBlockFixture()
+    {
+        TestBlockHeaderJson genesis = GenesisHeader(baseFeePerGas: "0x07");
+        byte[] blockRlp = Rlp.Encode(new Block(JsonToEthereumTest.Convert(ChildHeader(genesis, "0x01")))).Bytes;
+        string blockHash = Rlp.Decode<Block>(blockRlp).Header.Hash!.ToString();
+
+        string file = Path.Combine(_directory, "one_block.json");
+        File.WriteAllText(file, $$"""
+            {
+              "one_block": {
+                "network": "Paris",
+                "sealEngine": "NoProof",
+                "genesisBlockHeader": {{_serializer.Serialize(genesis)}},
+                "blocks": [{ "rlp": "{{blockRlp.ToHexString(true)}}" }],
+                "lastblockhash": "{{blockHash}}",
+                "pre": {},
+                "postState": {}
+              }
+            }
+            """);
+
+        return (file, blockHash);
+    }
+
+    /// <summary>A post-merge Paris child of <paramref name="parent"/> with the given block number.</summary>
+    private static TestBlockHeaderJson ChildHeader(TestBlockHeaderJson parent, string number)
+    {
+        TestBlockHeaderJson child = GenesisHeader();
+        child.Difficulty = "0x00";
+        child.Number = number;
+        child.ParentHash = parent.Hash;
+        child.Timestamp = "0x0c";
+        child.BaseFeePerGas = BaseFeeCalculator.Calculate(JsonToEthereumTest.Convert(parent), Paris.Instance).ToHexString(true);
+        return child;
+    }
+
     private static string MismatchingPostState()
     {
         StringBuilder postState = new("{");
@@ -156,7 +219,7 @@ public class BlockchainTestJsonOutputTests
         return postState.Append('}').ToString();
     }
 
-    private static TestBlockHeaderJson GenesisHeader()
+    private static TestBlockHeaderJson GenesisHeader(string baseFeePerGas = null)
     {
         TestBlockHeaderJson header = new()
         {
@@ -175,7 +238,8 @@ public class BlockchainTestJsonOutputTests
             StateRoot = Keccak.EmptyTreeHash.ToString(),
             Timestamp = "0x00",
             TransactionsTrie = Keccak.EmptyTreeHash.ToString(),
-            UncleHash = Keccak.OfAnEmptySequenceRlp.ToString()
+            UncleHash = Keccak.OfAnEmptySequenceRlp.ToString(),
+            BaseFeePerGas = baseFeePerGas
         };
 
         // The runner rejects a genesis header whose declared hash is not the one it derives, so take
