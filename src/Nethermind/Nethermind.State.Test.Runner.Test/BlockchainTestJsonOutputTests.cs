@@ -97,6 +97,40 @@ public class BlockchainTestJsonOutputTests
         Assert.That(EventLines(stderr), Is.Empty, $"stderr was: {Trim(stderr)}");
     }
 
+    [Test]
+    public async Task Every_path_argument_runs_in_one_results_array([Values("blocktest", "enginetest")] string command)
+    {
+        string first = WriteFixture();
+        string second = WriteOneBlockFixture().Path;
+        (string stdout, string stderr) = await RunNethtestWithArgs(command, first, second, "--jsonout", "--neverTrace");
+
+        Assert.That(ResultNames(stdout), Is.EquivalentTo(new[] { "more_than_8_differences", "one_block" }), $"stderr was: {Trim(stderr)}");
+    }
+
+    [Test]
+    public async Task Input_option_runs_together_with_path_arguments()
+    {
+        string directory = Path.Combine(_directory, "directory");
+        Directory.CreateDirectory(directory);
+        string inDirectory = Path.Combine(directory, "one_block.json");
+        File.Move(WriteOneBlockFixture().Path, inDirectory);
+        (string stdout, string stderr) = await RunNethtestWithArgs("blocktest", "--input", WriteFixture(), directory, "--jsonout", "--neverTrace");
+
+        Assert.That(ResultNames(stdout), Is.EquivalentTo(new[] { "more_than_8_differences", "one_block" }), $"stderr was: {Trim(stderr)}");
+    }
+
+    private static string[] ResultNames(string stdout)
+    {
+        using JsonDocument document = JsonDocument.Parse(stdout);
+        string[] names = new string[document.RootElement.GetArrayLength()];
+        for (int i = 0; i < names.Length; i++)
+        {
+            names[i] = document.RootElement[i].GetProperty("name").GetString()!;
+        }
+
+        return names;
+    }
+
     private static string[] EventLines(string stderr) =>
         Array.FindAll(stderr.Split('\n', StringSplitOptions.RemoveEmptyEntries), static line => line.StartsWith("{\"event\""));
 
@@ -109,14 +143,17 @@ public class BlockchainTestJsonOutputTests
     private static string Trim(string output) => output.Length <= 200 ? output : $"{output[..200]}...";
 
     /// <summary>Runs the built nethtest binary over a fixture the way the nethtest workflow does.</summary>
-    private static async Task<(string Stdout, string Stderr)> RunNethtest(string fixture, string testType = "--blockTest", params string[] extraArgs)
+    private static Task<(string Stdout, string Stderr)> RunNethtest(string fixture, string testType = "--blockTest", params string[] extraArgs) =>
+        RunNethtestWithArgs([testType, "--input", fixture, "--jsonout", "--neverTrace", .. extraArgs]);
+
+    private static async Task<(string Stdout, string Stderr)> RunNethtestWithArgs(params string[] args)
     {
         string executable = Path.Combine(AppContext.BaseDirectory, OperatingSystem.IsWindows() ? "nethtest.exe" : "nethtest");
         Assert.That(File.Exists(executable), $"nethtest was not built next to the tests at {executable}");
 
         using Process process = new()
         {
-            StartInfo = new ProcessStartInfo(executable, [testType, "--input", fixture, "--jsonout", "--neverTrace", .. extraArgs])
+            StartInfo = new ProcessStartInfo(executable, args)
             {
                 RedirectStandardOutput = true,
                 RedirectStandardError = true
