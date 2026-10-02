@@ -136,6 +136,86 @@ public class BlockchainTestJsonOutputTests
         }
     }
 
+    [Test]
+    public async Task A_fixture_with_no_rejected_block_reports_no_rejections([Values("blocktest", "enginetest")] string command)
+    {
+        string fixture = command == "blocktest" ? WriteOneBlockFixture().Path : WriteEngineFixture("clean_engine", []);
+        (string stdout, string stderr) = await RunNethtest(fixture, command);
+
+        JsonElement result = SingleResult(stdout);
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(result.GetProperty("pass").GetBoolean(), Is.True, $"stderr was: {Trim(stderr)}");
+            Assert.That(result.GetProperty("rejections").GetArrayLength(), Is.Zero);
+        }
+    }
+
+    // The fixture names an exception other than the one nethermind reports, so the test passes only because the
+    // runner leaves the reason to the consumer.
+    [Test]
+    public async Task Block_test_reports_each_rejected_block_with_the_client_error_and_does_not_check_it()
+    {
+        (string fixture, string invalidBlockHash) = WriteRejectedBlocksFixture("TransactionException.INSUFFICIENT_ACCOUNT_FUNDS");
+        (string stdout, string stderr) = await RunNethtest(fixture, "blocktest");
+
+        JsonElement result = SingleResult(stdout);
+        JsonElement rejections = result.GetProperty("rejections");
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(result.GetProperty("pass").GetBoolean(), Is.True, $"stdout was: {Trim(stdout)}, stderr was: {Trim(stderr)}");
+            Assert.That(rejections.GetArrayLength(), Is.EqualTo(2), $"stdout was: {Trim(stdout)}");
+        }
+
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(rejections[0].GetProperty("index").GetInt32(), Is.Zero);
+            Assert.That(rejections[0].TryGetProperty("hash", out _), Is.False, "a block that does not decode has no hash");
+            Assert.That(rejections[0].GetProperty("error").GetString(), Is.Not.Empty);
+            Assert.That(rejections[1].GetProperty("index").GetInt32(), Is.EqualTo(1));
+            Assert.That(rejections[1].GetProperty("hash").GetString(), Is.EqualTo(invalidBlockHash));
+            Assert.That(rejections[1].GetProperty("error").GetString(), Does.StartWith("InvalidBlockNumber: "));
+        }
+    }
+
+    [Test]
+    public async Task Engine_test_reports_an_invalid_payload_and_a_json_rpc_error_by_payload_index()
+    {
+        (string invalidPayload, string invalidBlockHash) = SkippedNumberPayload();
+        string fixture = WriteEngineFixture("rejected_engine",
+        [
+            $$"""{ "params": [{{invalidPayload}}], "newPayloadVersion": "1", "forkchoiceUpdatedVersion": "1", "validationError": "BlockException.INVALID_BLOCK_NUMBER" }""",
+            // newPayloadV3 refuses a payload without the Shanghai and Cancun fields before validating it.
+            $$"""{ "params": [{{invalidPayload}}, [], "{{Keccak.Zero}}"], "newPayloadVersion": "3", "forkchoiceUpdatedVersion": "1", "errorCode": "-32602" }""",
+        ]);
+        (string stdout, string stderr) = await RunNethtest(fixture, "enginetest");
+
+        JsonElement result = SingleResult(stdout);
+        JsonElement rejections = result.GetProperty("rejections");
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(result.GetProperty("pass").GetBoolean(), Is.True, $"stdout was: {Trim(stdout)}, stderr was: {Trim(stderr)}");
+            Assert.That(rejections.GetArrayLength(), Is.EqualTo(2), $"stdout was: {Trim(stdout)}");
+        }
+
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(rejections[0].GetProperty("index").GetInt32(), Is.Zero);
+            Assert.That(rejections[0].GetProperty("hash").GetString(), Is.EqualTo(invalidBlockHash));
+            Assert.That(rejections[0].GetProperty("error").GetString(), Does.StartWith("InvalidBlockNumber: "));
+            Assert.That(rejections[1].GetProperty("index").GetInt32(), Is.EqualTo(1));
+            Assert.That(rejections[1].TryGetProperty("hash", out _), Is.False, "a payload refused over JSON-RPC was never hashed");
+            Assert.That(rejections[1].GetProperty("error").GetString(), Does.StartWith("-32602: "));
+        }
+    }
+
+    /// <summary>Parses a results array holding exactly one result.</summary>
+    private static JsonElement SingleResult(string stdout)
+    {
+        JsonElement root = JsonDocument.Parse(stdout).RootElement;
+        Assert.That(root.GetArrayLength(), Is.EqualTo(1), $"stdout was: {Trim(stdout)}");
+        return root[0];
+    }
+
     private static string[] ResultNames(string stdout)
     {
         using JsonDocument document = JsonDocument.Parse(stdout);
@@ -264,6 +344,84 @@ public class BlockchainTestJsonOutputTests
         return child;
     }
 
+    /// <summary>
+    /// Writes a Paris fixture whose first block does not decode and whose second skips a block number, both
+    /// expected to be rejected; the second names <paramref name="expectException"/>.
+    /// </summary>
+    private (string Path, string InvalidBlockHash) WriteRejectedBlocksFixture(string expectException)
+    {
+        TestBlockHeaderJson genesis = GenesisHeader(baseFeePerGas: "0x07");
+        // Number 2 on genesis skips a block number, which header validation rejects.
+        byte[] blockRlp = Rlp.Encode(new Block(JsonToEthereumTest.Convert(ChildHeader(genesis, "0x02")))).Bytes;
+        string blockHash = Rlp.Decode<Block>(blockRlp).Header.Hash!.ToString();
+
+        string file = Path.Combine(_directory, "rejected_blocks.json");
+        File.WriteAllText(file, $$"""
+            {
+              "rejected_blocks": {
+                "network": "Paris",
+                "sealEngine": "NoProof",
+                "genesisBlockHeader": {{_serializer.Serialize(genesis)}},
+                "blocks": [
+                  { "rlp": "0xdead", "expectException": "BlockException.RLP_STRUCTURES_ENCODING" },
+                  { "rlp": "{{blockRlp.ToHexString(true)}}", "expectException": "{{expectException}}" }
+                ],
+                "lastblockhash": "{{genesis.Hash}}",
+                "pre": {},
+                "postState": {}
+              }
+            }
+            """);
+
+        return (file, blockHash);
+    }
+
+    /// <summary>Writes a Paris engine fixture whose head stays at genesis, sending the given payload entries.</summary>
+    private string WriteEngineFixture(string name, string[] payloads)
+    {
+        TestBlockHeaderJson genesis = GenesisHeader(baseFeePerGas: "0x07");
+        genesis.Difficulty = "0x00";
+        genesis.Hash = HashOf(genesis);
+
+        string file = Path.Combine(_directory, $"{name}.json");
+        File.WriteAllText(file, $$"""
+            {
+              "{{name}}": {
+                "network": "Paris",
+                "sealEngine": "NoProof",
+                "genesisBlockHeader": {{_serializer.Serialize(genesis)}},
+                "engineNewPayloads": [{{string.Join(",", payloads)}}],
+                "lastblockhash": "{{genesis.Hash}}",
+                "pre": {},
+                "postState": {}
+              }
+            }
+            """);
+
+        return file;
+    }
+
+    /// <summary>An <c>ExecutionPayloadV1</c> on the engine fixture's genesis that skips a block number.</summary>
+    private static (string Payload, string BlockHash) SkippedNumberPayload()
+    {
+        TestBlockHeaderJson genesis = GenesisHeader(baseFeePerGas: "0x07");
+        genesis.Difficulty = "0x00";
+        genesis.Hash = HashOf(genesis);
+        // Number 2 on genesis skips a block number, which header validation rejects.
+        TestBlockHeaderJson child = ChildHeader(genesis, "0x02");
+        string blockHash = HashOf(child);
+
+        return ($$"""
+            {
+              "parentHash": "{{child.ParentHash}}", "feeRecipient": "{{child.Coinbase}}", "stateRoot": "{{child.StateRoot}}",
+              "receiptsRoot": "{{child.ReceiptTrie}}", "logsBloom": "{{child.Bloom}}", "prevRandao": "{{child.MixHash}}",
+              "blockNumber": "{{child.Number}}", "gasLimit": "{{child.GasLimit}}", "gasUsed": "{{child.GasUsed}}",
+              "timestamp": "{{child.Timestamp}}", "extraData": "{{child.ExtraData}}", "baseFeePerGas": "{{child.BaseFeePerGas}}",
+              "blockHash": "{{blockHash}}", "transactions": []
+            }
+            """, blockHash);
+    }
+
     private static string MismatchingPostState()
     {
         StringBuilder postState = new("{");
@@ -304,7 +462,10 @@ public class BlockchainTestJsonOutputTests
 
         // The runner rejects a genesis header whose declared hash is not the one it derives, so take
         // the hash from the same encode/decode round trip it uses.
-        header.Hash = Rlp.Decode<Block>(Rlp.Encode(new Block(JsonToEthereumTest.Convert(header))).Bytes).Header.Hash!.ToString();
+        header.Hash = HashOf(header);
         return header;
     }
+
+    private static string HashOf(TestBlockHeaderJson header) =>
+        Rlp.Decode<Block>(Rlp.Encode(new Block(JsonToEthereumTest.Convert(header))).Bytes).Header.Hash!.ToString();
 }
