@@ -119,6 +119,23 @@ public class BlockchainTestJsonOutputTests
         Assert.That(ResultNames(stdout), Is.EquivalentTo(new[] { "more_than_8_differences", "one_block" }), $"stderr was: {Trim(stderr)}");
     }
 
+    [Test]
+    public async Task A_missing_path_is_an_error_before_anything_runs([Values] bool viaInputOption)
+    {
+        string missing = Path.Combine(_directory, "missing.json");
+        string[] args = viaInputOption
+            ? ["blocktest", WriteFixture(), "--input", missing, "--jsonout", "--neverTrace"]
+            : ["blocktest", WriteFixture(), missing, "--jsonout", "--neverTrace"];
+        (string stdout, string stderr, int exitCode) = await RunNethtestProcess(args);
+
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(exitCode, Is.Not.Zero);
+            Assert.That(stdout, Is.Empty, "no fixture may run when any path is missing");
+            Assert.That(stderr, Does.Contain(missing));
+        }
+    }
+
     private static string[] ResultNames(string stdout)
     {
         using JsonDocument document = JsonDocument.Parse(stdout);
@@ -148,6 +165,12 @@ public class BlockchainTestJsonOutputTests
 
     private static async Task<(string Stdout, string Stderr)> RunNethtestWithArgs(params string[] args)
     {
+        (string stdout, string stderr, _) = await RunNethtestProcess(args);
+        return (stdout, stderr);
+    }
+
+    private static async Task<(string Stdout, string Stderr, int ExitCode)> RunNethtestProcess(string[] args)
+    {
         string executable = Path.Combine(AppContext.BaseDirectory, OperatingSystem.IsWindows() ? "nethtest.exe" : "nethtest");
         Assert.That(File.Exists(executable), $"nethtest was not built next to the tests at {executable}");
 
@@ -175,7 +198,7 @@ public class BlockchainTestJsonOutputTests
             Assert.Fail($"nethtest did not exit within {NethtestTimeout}");
         }
 
-        return (await stdout, await stderr);
+        return (await stdout, await stderr, process.ExitCode);
     }
 
     /// <summary>

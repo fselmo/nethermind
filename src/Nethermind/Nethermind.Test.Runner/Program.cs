@@ -215,7 +215,8 @@ internal class Program
 
         while (inputs.Count > 0)
         {
-            List<string> files = CollectFiles(inputs, chunk);
+            List<string>? files = CollectFiles(inputs, chunk);
+            if (files is null) return 1;
 
             if (isEngineTest || isBlockTest)
             {
@@ -264,31 +265,51 @@ internal class Program
     private static List<string> NextStdinInput() =>
         Console.ReadLine() is { } line && !string.IsNullOrWhiteSpace(line) ? [line] : [];
 
-    private static List<string> CollectFiles(List<string> paths, string? chunk = null)
+    /// <summary>
+    /// Expands the paths to their fixture files; null when any path does not exist or cannot be read,
+    /// after naming each such path on stderr.
+    /// </summary>
+    private static List<string>? CollectFiles(List<string> paths, string? chunk = null)
     {
         List<string> result = [];
+        bool allReadable = true;
         foreach (string path in paths)
         {
-            if (File.Exists(path))
+            try
             {
-                result.Add(path);
-            }
-            else if (Directory.Exists(path))
-            {
-                List<string> directoryFiles = [];
-                foreach (string file in Directory.GetFiles(path, "*.json", SearchOption.AllDirectories))
+                if (File.Exists(path))
                 {
-                    if (!file.Contains("/.meta/") && !file.Contains("\\.meta\\"))
-                        directoryFiles.Add(file);
+                    File.OpenRead(path).Dispose();
+                    result.Add(path);
                 }
+                else if (Directory.Exists(path))
+                {
+                    List<string> directoryFiles = [];
+                    foreach (string file in Directory.GetFiles(path, "*.json", SearchOption.AllDirectories))
+                    {
+                        if (!file.Contains("/.meta/") && !file.Contains("\\.meta\\"))
+                            directoryFiles.Add(file);
+                    }
 
-                // Sorted before chunking so every chunk job sees the same order and the
-                // interleaved NofM partition is deterministic across CI jobs.
-                directoryFiles.Sort(StringComparer.Ordinal);
-                result.AddRange(directoryFiles);
+                    // Sorted before chunking so every chunk job sees the same order and the
+                    // interleaved NofM partition is deterministic across CI jobs.
+                    directoryFiles.Sort(StringComparer.Ordinal);
+                    result.AddRange(directoryFiles);
+                }
+                else
+                {
+                    Console.Error.WriteLine($"Fixture path does not exist: {path}");
+                    allReadable = false;
+                }
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                Console.Error.WriteLine($"Fixture path cannot be read: {path} - {ex.Message}");
+                allReadable = false;
             }
         }
 
+        if (!allReadable) return null;
         return string.IsNullOrEmpty(chunk) ? result : [.. TestChunkFilter.FilterByChunk(result, chunk)];
     }
 
