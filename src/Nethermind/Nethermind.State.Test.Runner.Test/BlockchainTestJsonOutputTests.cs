@@ -223,6 +223,42 @@ public class BlockchainTestJsonOutputTests
         }
     }
 
+    // An EEST fixture whose block access list carries an entry the block never produces. The header commits to that
+    // list, so it is delivered and judged during execution: the parallel executor rejects it and the sequential retry
+    // rejects it again, or, with parallel execution off, the sequential executor rejects it once.
+    [TestCase("blocktest", true)]
+    [TestCase("blocktest", false)]
+    [TestCase("enginetest", true)]
+    [TestCase("enginetest", false)]
+    public async Task A_corrupted_access_list_is_rejected_by_either_executor(string command, bool parallelExecution)
+    {
+        string fixture = Path.Combine(AppContext.BaseDirectory, "Fixtures", $"bal_invalid_surplus_system_address_{command}.json");
+        (string stdout, string stderr) = await RunNethtest(fixture, command, "--bal-report", "--parallelExecution", parallelExecution ? "true" : "false");
+
+        JsonElement result = SingleResult(stdout);
+        string[] events = Array.ConvertAll(EventLines(stderr), static line =>
+        {
+            using JsonDocument document = JsonDocument.Parse(line);
+            JsonElement root = document.RootElement;
+            return root.GetProperty("event").GetString() == "balExecution"
+                ? $"balExecution {root.GetProperty("path").GetString()} {root.GetProperty("reason").GetString()}".TrimEnd()
+                : $"balFallback {root.GetProperty("sequentialResult").GetString()}";
+        });
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(result.GetProperty("pass").GetBoolean(), Is.True, $"stdout was: {Trim(stdout)}");
+            Assert.That(result.GetProperty("rejections").GetArrayLength(), Is.EqualTo(1), $"stdout was: {Trim(stdout)}");
+            Assert.That(events, Is.EqualTo(parallelExecution
+                ? new[] { "balExecution parallel", "balFallback invalid" }
+                : new[] { "balExecution sequential disabled" }), $"stderr was: {Trim(stderr)}");
+        }
+
+        if (command == "enginetest")
+        {
+            Assert.That(result.GetProperty("lastPayloadStatus").GetString(), Is.EqualTo("INVALID"));
+        }
+    }
+
     /// <summary>Parses a results array holding exactly one result.</summary>
     private static JsonElement SingleResult(string stdout)
     {
