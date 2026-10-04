@@ -67,12 +67,27 @@ public class BlockchainTestJsonOutputTests
         }
     }
 
-    [Test]
-    public async Task Block_tests_run_under_the_standard_command_name_and_the_option([Values("blocktest", "--blockTest")] string testType)
+    [TestCase("blocktest", "--blockTest")]
+    [TestCase("enginetest", "--engineTest")]
+    [TestCase("statetest", "--stateTest")]
+    public async Task Each_command_runs_the_same_tests_as_its_option(string command, string option)
     {
-        (string stdout, _) = await RunNethtest(WriteFixture(), testType);
+        string fixture = command switch
+        {
+            "blocktest" => WriteFixture(),
+            "enginetest" => WriteEngineFixture("clean_engine", []),
+            "statetest" => WriteStateFixture(),
+            _ => throw new ArgumentOutOfRangeException(nameof(command))
+        };
+        (string commandStdout, string commandStderr) = await RunNethtest(fixture, command);
+        (string optionStdout, _) = await RunNethtest(fixture, option);
 
-        Assert.That(ResultCount(stdout), Is.EqualTo(1), $"stdout was: {Trim(stdout)}");
+        string[] names = ResultNames(commandStdout);
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(names, Has.Length.EqualTo(1), $"stderr was: {Trim(commandStderr)}");
+            Assert.That(names, Is.EqualTo(ResultNames(optionStdout)));
+        }
     }
 
     [Test]
@@ -300,6 +315,45 @@ public class BlockchainTestJsonOutputTests
                 "lastblockhash": "{{genesis.Hash}}",
                 "pre": {},
                 "postState": {{MismatchingPostState()}}
+              }
+            }
+            """);
+
+        return file;
+    }
+
+    /// <summary>Writes a Berlin state test with one value transfer; whether it passes does not matter here.</summary>
+    private string WriteStateFixture()
+    {
+        string file = Path.Combine(_directory, "one_transfer.json");
+        File.WriteAllText(file, $$"""
+            {
+              "one_transfer": {
+                "env": {
+                  "currentCoinbase": "0x2adc25665018aa1fe0e6bc666dac8fc2697ff9ba",
+                  "currentDifficulty": "0x020000",
+                  "currentGasLimit": "0x0f4240",
+                  "currentNumber": "0x01",
+                  "currentTimestamp": "0x03e8",
+                  "previousHash": "{{Keccak.Zero}}"
+                },
+                "pre": {
+                  "0xa94f5374fce5edbc8e2a8697c15331677e6ebf0b": { "balance": "0x0f4240", "code": "0x", "nonce": "0x00", "storage": {} }
+                },
+                "transaction": {
+                  "secretKey": "0x45a915e4d060149eb4365960e6a7a45f334393093061116b197e3240065ff2d8",
+                  "nonce": "0x00",
+                  "gasPrice": "0x0a",
+                  "gasLimit": ["0x5208"],
+                  "to": "0x1000000000000000000000000000000000000000",
+                  "value": ["0x01"],
+                  "data": ["0x"]
+                },
+                "post": {
+                  "Berlin": [
+                    { "hash": "{{Keccak.Zero}}", "logs": "{{Keccak.Zero}}", "indexes": { "data": 0, "gas": 0, "value": 0 } }
+                  ]
+                }
               }
             }
             """);
