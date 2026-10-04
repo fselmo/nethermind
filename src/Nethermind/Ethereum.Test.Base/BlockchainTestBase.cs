@@ -29,6 +29,7 @@ using Nethermind.Crypto;
 using Nethermind.Db;
 using Nethermind.Int256;
 using Nethermind.Logging;
+using Nethermind.Serialization.Json;
 using Nethermind.Serialization.Rlp;
 using Nethermind.Specs.Forks;
 using Nethermind.Specs.Test;
@@ -54,6 +55,7 @@ public abstract class BlockchainTestBase
 {
     private static readonly ILogManager _logManager = new TestLogManager(LogLevel.Warn);
     private static readonly ILogger _logger = _logManager.GetClassLogger<BlockchainTestBase>();
+    private static readonly EthereumJsonSerializer _rpcErrorDataSerializer = new();
     private const int _genesisProcessingTimeoutMs = 30000;
     private static readonly TimeSpan EngineProcessingTimeout = TimeSpan.FromMinutes(10);
 
@@ -68,6 +70,11 @@ public abstract class BlockchainTestBase
     /// Null means use the default config value.
     /// </summary>
     protected virtual bool? ParallelExecutionBatchReadOverride => null;
+
+    /// <summary>
+    /// Override to be told which executor runs each block, and of each sequential retry. Null means nothing is told.
+    /// </summary>
+    protected virtual IBlockAccessListExecutionReport? BlockAccessListExecutionObserver => null;
 
     /// <summary>
     /// Override to replace the log manager used by internal Nethermind components.
@@ -113,8 +120,11 @@ public abstract class BlockchainTestBase
         Stopwatch? stopwatch = null,
         bool failOnInvalidRlp = true,
         ITestBlockTracer? tracer = null,
-        ISpecProvider? specProvider = null)
+        ISpecProvider? specProvider = null,
+        List<BlockRejection>? rejections = null)
     {
+        rejections ??= [];
+        RejectionRecorder rejectionRecorder = new(rejections);
         _logger.Info($"Running {test.Name}, Network: [{test.Network!.Name}] at {DateTime.UtcNow:HH:mm:ss.ffffff}");
         if (test.NetworkAfterTransition is not null)
             _logger.Info($"Network after transition: [{test.NetworkAfterTransition.Name}] at {test.TransitionForkActivation}");
@@ -186,6 +196,16 @@ public abstract class BlockchainTestBase
         if (isEngineTest || isPostMerge)
         {
             containerBuilder.AddModule(new TestMergeModule());
+        }
+
+        // Blocks whose delivered access list the runner dropped; filled before any block is suggested.
+        HashSet<Hash256> droppedAccessLists = [];
+        if (BlockAccessListExecutionObserver is { } executionReport)
+        {
+            SequentialRetryReport retryReport = new(new DroppedAccessListObserver(executionReport, droppedAccessLists));
+            containerBuilder
+                .AddSingleton<IBlockAccessListExecutionObserver>(retryReport)
+                .AddDecorator<IBlockProcessor>((_, processor) => retryReport.Decorate(processor));
         }
 
         // Seed the optional test tracer into the main processor via the BlockchainProcessor constructor.
@@ -267,8 +287,11 @@ public abstract class BlockchainTestBase
                 {
                     if (args.ProcessingResult != ProcessingResult.Success)
                         asyncBlockError = args.Message ?? args.Exception?.Message;
+                    // An unsatisfied inclusion list still commits the block, so it is no rejection.
+                    if (args.ProcessingResult is not (ProcessingResult.Success or ProcessingResult.InclusionListUnsatisfied))
+                        rejectionRecorder.Record(args.BlockHash, args.Message ?? args.Exception?.Message ?? args.ProcessingResult.ToString());
                 };
-                Result<BlockHeader> suggestResult = SuggestBlocks(test, failOnInvalidRlp, blockValidator, blockTree, parentHeader);
+                Result<BlockHeader> suggestResult = SuggestBlocks(test, failOnInvalidRlp, blockValidator, blockTree, parentHeader, droppedAccessLists, rejectionRecorder);
                 parentHeader = suggestResult.Data!;
                 lastValidationError = suggestResult.Error;
             }
@@ -278,7 +301,7 @@ public abstract class BlockchainTestBase
                 IJsonRpcService rpcService = container.Resolve<IJsonRpcService>();
                 JsonRpcUrl engineUrl = new(Uri.UriSchemeHttp, "localhost", 8551, RpcEndpoint.Http, true, ["engine"]);
                 JsonRpcContext rpcContext = new(RpcEndpoint.Http, url: engineUrl);
-                Result<string> payloadResult = await RunNewPayloads(test.EngineNewPayloads, rpcService, rpcContext, blockchainProcessingQueue, parentHeader.Hash!, engineWitnessDifferences);
+                Result<string> payloadResult = await RunNewPayloads(test.EngineNewPayloads, rpcService, rpcContext, blockchainProcessingQueue, parentHeader.Hash!, engineWitnessDifferences, rejectionRecorder);
                 lastPayloadStatus = payloadResult.Data ?? "";
                 lastValidationError = payloadResult.Error;
             }
@@ -304,7 +327,7 @@ public abstract class BlockchainTestBase
             Assert.That(headBlock, Is.Not.Null);
             if (headBlock is null)
             {
-                return new EthereumTestResult(test.Name, test.ForkName, false) { Error = "head block is null" };
+                return new EthereumTestResult(test.Name, test.ForkName, false) { Error = "head block is null", Rejections = rejections };
             }
 
             List<string> differences;
@@ -337,6 +360,7 @@ public abstract class BlockchainTestBase
             {
                 LastBlockHash = headBlock?.Hash,
                 LastPayloadStatus = string.IsNullOrEmpty(lastPayloadStatus) ? null : lastPayloadStatus,
+                Rejections = rejections,
                 Error = !testPassed
                     ? string.Join("; ", differences)
                     : lastValidationError,
@@ -357,10 +381,10 @@ public abstract class BlockchainTestBase
     /// block was rejected, the rejection message in <see cref="Result{TData}.Error"/> (the header
     /// is still populated — rejection of an expected-invalid block does not fail the test).
     /// </returns>
-    private static Result<BlockHeader> SuggestBlocks(BlockchainTest test, bool failOnInvalidRlp, IBlockValidator blockValidator, IBlockTree blockTree, BlockHeader parentHeader)
+    private static Result<BlockHeader> SuggestBlocks(BlockchainTest test, bool failOnInvalidRlp, IBlockValidator blockValidator, IBlockTree blockTree, BlockHeader parentHeader, ISet<Hash256> droppedAccessLists, RejectionRecorder rejectionRecorder)
     {
         string? lastBlockError = null;
-        List<(Block Block, string ExpectedException)> correctRlp = DecodeRlps(test, failOnInvalidRlp);
+        List<(Block Block, string ExpectedException)> correctRlp = DecodeRlps(test, failOnInvalidRlp, droppedAccessLists, rejectionRecorder);
         for (int i = 0; i < correctRlp.Count; i++)
         {
             // Setting IsPostMerge here would bypass PoSSwitcher and hide divergences
@@ -386,6 +410,7 @@ public abstract class BlockchainTestBase
                 }
                 catch (InvalidBlockException e)
                 {
+                    rejectionRecorder.Record(correctRlp[i].Block.Hash!, e.Message);
                     Assert.That(expectsException, $"Unexpected invalid block {correctRlp[i].Block.Hash}: {e.Message}");
                     lastBlockError = e.Message;
                 }
@@ -401,6 +426,7 @@ public abstract class BlockchainTestBase
             else
             {
                 // Header validation failed
+                rejectionRecorder.Record(correctRlp[i].Block.Hash!, validationError ?? "");
                 Assert.That(expectsException, $"Unexpected invalid block {correctRlp[i].Block.Hash}: {validationError}");
                 lastBlockError = validationError;
             }
@@ -436,7 +462,7 @@ public abstract class BlockchainTestBase
     /// carried a validation error, that error in <see cref="Result{TData}.Error"/> (an expected
     /// rejection does not fail the test, so the status is still populated).
     /// </returns>
-    private static async Task<Result<string>> RunNewPayloads(TestEngineNewPayloadsJson[]? newPayloads, IJsonRpcService rpcService, JsonRpcContext rpcContext, IBlockProcessingQueue processingQueue, Hash256 initialHeadHash, List<string> witnessDifferences)
+    private static async Task<Result<string>> RunNewPayloads(TestEngineNewPayloadsJson[]? newPayloads, IJsonRpcService rpcService, JsonRpcContext rpcContext, IBlockProcessingQueue processingQueue, Hash256 initialHeadHash, List<string> witnessDifferences, RejectionRecorder rejectionRecorder)
     {
         if (newPayloads is null || newPayloads.Length == 0) return Result<string>.Success("");
 
@@ -446,8 +472,9 @@ public abstract class BlockchainTestBase
 
         string lastStatus = "";
         string? lastValidationError = null;
-        foreach (TestEngineNewPayloadsJson enginePayload in newPayloads)
+        for (int payloadIndex = 0; payloadIndex < newPayloads.Length; payloadIndex++)
         {
+            TestEngineNewPayloadsJson enginePayload = newPayloads[payloadIndex];
             if (!int.TryParse(enginePayload.NewPayloadVersion ?? EngineApiVersions.NewPayload.Latest.ToString(), out int newPayloadVersion))
                 throw new FormatException($"Invalid NewPayloadVersion: '{enginePayload.NewPayloadVersion}'");
             if (!int.TryParse(enginePayload.ForkChoiceUpdatedVersion ?? EngineApiVersions.Fcu.Latest.ToString(), out int fcuVersion))
@@ -470,6 +497,7 @@ public abstract class BlockchainTestBase
 
             if (TryGetRpcError(npResponse, out int errorCode, out string? errorMessage))
             {
+                rejectionRecorder.Record(payloadIndex, null, DescribeRpcRejection(npResponse, errorCode, errorMessage));
                 AssertExpectedRpcError(errorCode, errorMessage, expectedErrorCode, newPayloadVersion);
             }
             else
@@ -487,6 +515,7 @@ public abstract class BlockchainTestBase
 
                     using NewPayloadWithWitnessV1Result witnessResult = GetWitnessResult(npResponse, newPayloadVersion);
                     PayloadStatusV1 payloadStatus = new() { Status = witnessResult.Status, ValidationError = witnessResult.ValidationError, LatestValidHash = witnessResult.LatestValidHash };
+                    RecordInvalidPayload(rejectionRecorder, payloadIndex, enginePayload, payloadStatus);
                     AssertPayloadStatus(payloadStatus, validationError, newPayloadVersion);
                     lastStatus = payloadStatus.Status;
                     if (payloadStatus.ValidationError is not null)
@@ -510,6 +539,7 @@ public abstract class BlockchainTestBase
                 else
                 {
                     PayloadStatusV1 payloadStatus = GetPayloadStatus(npResponse, newPayloadVersion);
+                    RecordInvalidPayload(rejectionRecorder, payloadIndex, enginePayload, payloadStatus);
                     AssertPayloadStatus(payloadStatus, validationError, newPayloadVersion, enginePayload.InclusionListSatisfied);
                     lastStatus = payloadStatus.Status;
                     if (payloadStatus.ValidationError is not null)
@@ -528,6 +558,40 @@ public abstract class BlockchainTestBase
         return lastValidationError is null
             ? Result<string>.Success(lastStatus)
             : Result<string>.Fail(lastValidationError, lastStatus);
+    }
+
+    /// <summary>
+    /// Records an INVALID payload under the block hash it was sent with, which the client has checked by then.
+    /// </summary>
+    private static void RecordInvalidPayload(RejectionRecorder rejectionRecorder, int payloadIndex, TestEngineNewPayloadsJson enginePayload, PayloadStatusV1 payloadStatus)
+    {
+        if (payloadStatus.Status != PayloadStatus.Invalid) return;
+
+        Hash256? blockHash = enginePayload.Params[0].TryGetProperty("blockHash", out JsonElement hash) && hash.GetString() is { } hex
+            ? new Hash256(hex)
+            : null;
+        rejectionRecorder.Record(payloadIndex, blockHash, payloadStatus.ValidationError ?? "");
+    }
+
+    /// <summary>
+    /// Formats a JSON-RPC error as <c>code: message</c>, followed by <c>: data</c> when the error carries data,
+    /// which is where the specific cause often is. A string is appended as is, anything else as compact JSON.
+    /// </summary>
+    internal static string DescribeRpcRejection(JsonRpcResponse response, int errorCode, string? errorMessage)
+    {
+        object? errorData = response switch
+        {
+            JsonRpcErrorResponse errorResponse => errorResponse.Error?.Data,
+            IResultWrapper { Result.ResultType: ResultType.Failure, HasErrorData: true } resultWrapper => resultWrapper.Data,
+            _ => null
+        };
+
+        return errorData switch
+        {
+            null => $"{errorCode}: {errorMessage}",
+            string data => $"{errorCode}: {errorMessage}: {data}",
+            _ => $"{errorCode}: {errorMessage}: {_rpcErrorDataSerializer.Serialize(errorData)}"
+        };
     }
 
     private static NewPayloadWithWitnessV1Result GetWitnessResult(JsonRpcResponse response, int payloadVersion) =>
@@ -822,16 +886,26 @@ public abstract class BlockchainTestBase
         Assert.That(((IResultWrapper)response).Result.ResultType, Is.EqualTo(ResultType.Success));
     }
 
-    private static List<(Block Block, string ExpectedException)> DecodeRlps(BlockchainTest test, bool failOnInvalidRlp)
+    private static List<(Block Block, string ExpectedException)> DecodeRlps(BlockchainTest test, bool failOnInvalidRlp, ISet<Hash256> droppedAccessLists, RejectionRecorder rejectionRecorder)
     {
         List<(Block Block, string ExpectedException)> correctRlp = [];
         for (int i = 0; i < test.Blocks!.Length; i++)
         {
             TestBlockJson testBlockJson = test.Blocks[i];
+            Block? suggestedBlock = null;
             try
             {
                 byte[] rlpBytes = Bytes.FromHexString(testBlockJson.Rlp!);
-                Block suggestedBlock = Rlp.Decode<Block>(rlpBytes);
+                suggestedBlock = Rlp.Decode<Block>(rlpBytes);
+                rejectionRecorder.Register(suggestedBlock.Hash!, i);
+                // The list travels beside the block, as it does over the network, so a list that does not match
+                // the header is dropped as the client's sync drops a peer's. One the header commits to but the
+                // decoder rejects throws here, and the block is invalid.
+                if (testBlockJson.DeliveredBlockAccessList is { } accessList
+                    && !BlockAccessListAccountJson.TryDeliver(suggestedBlock, accessList))
+                {
+                    droppedAccessLists.Add(suggestedBlock.Hash!);
+                }
 
                 // EEST omits blockHeader (and the parsed body fields) for invalid-block fixtures
                 // because there is no canonical header for a block that must be rejected. The
@@ -852,6 +926,12 @@ public abstract class BlockchainTestBase
             }
             catch (Exception e)
             {
+                // The runner's own header-hash assertions are not the client rejecting the block.
+                if (e is not AssertionException)
+                {
+                    rejectionRecorder.Record(i, suggestedBlock?.Hash, e.Message);
+                }
+
                 if (testBlockJson.ExpectException is null)
                 {
                     string invalidRlpMessage = $"Invalid RLP ({i}) {e}";
@@ -1125,5 +1205,61 @@ public abstract class BlockchainTestBase
             differences.Add($"witness {section} (block {blockHash}) at index {i}: expected 0x{Bytes.FromHexString(expected![i]).ToHexString()}, none produced");
         for (int i = common; i < actual.Count; i++)
             differences.Add($"witness {section} (block {blockHash}) at index {i}: produced 0x{actual[i].ToHexString()}, none expected");
+    }
+
+    /// <summary>
+    /// Reports a block whose delivered list the runner dropped with the reason <c>bad-access-list</c>, ahead of any
+    /// reason the node gives, <c>disabled</c> included. Such a block has no list, so it never runs in parallel here.
+    /// </summary>
+    /// <remarks>Built per test, so a dropped list in one fixture never relabels the same block in another.</remarks>
+    public sealed class DroppedAccessListObserver(IBlockAccessListExecutionReport inner, IReadOnlySet<Hash256> droppedAccessLists)
+        : IBlockAccessListExecutionReport
+    {
+        public void OnExecutionPathChosen(Block block, string? sequentialReason) =>
+            inner.OnExecutionPathChosen(block,
+                sequentialReason is not null && block.Hash is { } hash && droppedAccessLists.Contains(hash)
+                    ? "bad-access-list"
+                    : sequentialReason);
+
+        public void OnSequentialRetry(Block block, Exception parallelError, Exception? sequentialError) =>
+            inner.OnSequentialRetry(block, parallelError, sequentialError);
+    }
+
+    /// <summary>
+    /// Collects one test's rejected blocks or payloads, ordered by their index in the fixture, one entry per index.
+    /// </summary>
+    /// <remarks>
+    /// The processor reports a rejection by block hash on its own thread, so hashes are registered at decoding,
+    /// before any block is suggested.
+    /// </remarks>
+    private sealed class RejectionRecorder(List<BlockRejection> rejections)
+    {
+        private readonly Dictionary<Hash256, int> _indexByHash = [];
+
+        public void Register(Hash256 hash, int index) => _indexByHash.TryAdd(hash, index);
+
+        public void Record(Hash256 hash, string error)
+        {
+            if (_indexByHash.TryGetValue(hash, out int index))
+            {
+                Record(index, hash, error);
+            }
+        }
+
+        public void Record(int index, Hash256? hash, string error)
+        {
+            lock (rejections)
+            {
+                int position = rejections.FindIndex(r => r.Index >= index);
+                if (position < 0)
+                {
+                    rejections.Add(new BlockRejection(index, hash, error));
+                }
+                else if (rejections[position].Index != index)
+                {
+                    rejections.Insert(position, new BlockRejection(index, hash, error));
+                }
+            }
+        }
     }
 }

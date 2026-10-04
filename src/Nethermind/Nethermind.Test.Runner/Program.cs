@@ -4,6 +4,7 @@
 using System;
 using System.Collections.Generic;
 using System.CommandLine;
+using System.CommandLine.Help;
 using System.IO;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -23,8 +24,11 @@ internal class Program
 
     public class Options
     {
+        public static Argument<string[]> Paths { get; } =
+            new("path") { Description = "Test input files or directories, run together as one batch.", Arity = ArgumentArity.ZeroOrMore };
+
         public static Option<string> Input { get; } =
-            new("--input", "-i") { Description = "Set the test input file or directory." };
+            new("--input", "-i") { Description = "Set the test input file or directory; runs together with any <path> arguments." };
 
         public static Option<string> Filter { get; } =
             new("--run", "--filter", "-f") { Description = "Run only those tests matching the regular expression." };
@@ -60,7 +64,7 @@ internal class Program
             new("--wait", "-w") { Description = "Wait for input after the test run." };
 
         public static Option<bool> Stdin { get; } =
-            new("--stdin", "-x") { Description = "If stdin is used, the runner will read inputs (filenames) from stdin, and continue executing until empty line is read." };
+            new("--stdin", "-x") { Description = "If stdin is used, the runner will read inputs (filenames) from stdin, and continue executing until empty line is read. Each line gets its own results document, after the one for any <path> arguments." };
 
         public static Option<bool> GnosisTest { get; } =
             new("--gnosisTest", "-g") { Description = "Set test as gnosisTest. if not, it will be by default assumed a mainnet test." };
@@ -85,6 +89,9 @@ internal class Program
 
         public static Option<bool?> BatchRead { get; } =
             new("--batchRead") { Description = "Force BAL batch-read prewarming on or off; when omitted, the client config default is used. [Only for Blockchain/Engine Test]" };
+
+        public static Option<bool> BalReport { get; } =
+            new("--bal-report") { Description = "Print a JSON line on stderr naming the executor (parallel or sequential) that ran each block, and one when a block the parallel executor rejected is re-run sequentially. [Only for Blockchain/Engine Test]" };
 
         public static Option<string[]> ForkAlias { get; } =
             new("--forkAlias") { Description = "Resolve a fixture's declared fork name as another fork, e.g. 'Bogota=Eip8141Prototype'. Repeatable; needed where separate fixture releases give one fork name incompatible meanings.", AllowMultipleArgumentsPerToken = true };
@@ -117,29 +124,50 @@ internal class Program
             Options.TrieDb,
             Options.ParallelExecution,
             Options.BatchRead,
+            Options.BalReport,
             Options.ForkAlias,
         ];
-        rootCommand.SetAction(Run);
+        rootCommand.SetAction((parseResult, cancellationToken) => Run(parseResult, null, cancellationToken));
+
+        // The names other clients' runners answer to, each the same as its option: `nethtest blocktest <path>...`.
+        foreach ((string name, Option<bool> testType) in StandardCommands)
+        {
+            Command command = new(name, testType.Description) { Options.Paths };
+            command.SetAction((parseResult, cancellationToken) => Run(parseResult, testType, cancellationToken));
+            rootCommand.Subcommands.Add(command);
+        }
+
+        foreach (Option option in rootCommand.Options)
+        {
+            if (option is not HelpOption and not VersionOption) option.Recursive = true;
+        }
 
         return await rootCommand.Parse(args).InvokeAsync();
     }
 
-    private static async Task<int> Run(ParseResult parseResult, CancellationToken cancellationToken)
+    private static readonly (string Name, Option<bool> TestType)[] StandardCommands =
+    [
+        ("blocktest", Options.BlockTest),
+        ("enginetest", Options.EngineTest),
+        ("statetest", Options.StateTest),
+    ];
+
+    private static async Task<int> Run(ParseResult parseResult, Option<bool>? command, CancellationToken cancellationToken)
     {
         // stdout carries only the results document, so every other writer goes to stderr.
         TextWriter resultsOut = Console.Out;
         Console.SetOut(Console.Error);
 
-        bool isStateTest = parseResult.GetValue(Options.StateTest);
-        bool isBlockTest = parseResult.GetValue(Options.BlockTest);
-        bool isEngineTest = parseResult.GetValue(Options.EngineTest);
+        bool isStateTest = parseResult.GetValue(Options.StateTest) || command == Options.StateTest;
+        bool isBlockTest = parseResult.GetValue(Options.BlockTest) || command == Options.BlockTest;
+        bool isEngineTest = parseResult.GetValue(Options.EngineTest) || command == Options.EngineTest;
         bool isTxTest = parseResult.GetValue(Options.TxTest);
         bool isZkEvmTest = parseResult.GetValue(Options.ZkEvmTest);
 
         int testTypeCount = (isStateTest ? 1 : 0) + (isBlockTest ? 1 : 0) + (isEngineTest ? 1 : 0) + (isTxTest ? 1 : 0) + (isZkEvmTest ? 1 : 0);
         if (testTypeCount != 1)
         {
-            Console.WriteLine("Please specify one of: --stateTest, --blockTest, --engineTest, --txTest, or --zkevmTest");
+            Console.WriteLine("Please specify one of: blocktest, enginetest, statetest, --stateTest, --blockTest, --engineTest, --txTest, or --zkevmTest");
             return 1;
         }
 
@@ -147,8 +175,11 @@ internal class Program
         if (parseResult.GetValue(Options.TraceNever)) whenTrace = WhenTrace.Never;
         if (parseResult.GetValue(Options.TraceAlways)) whenTrace = WhenTrace.Always;
 
-        string input = parseResult.GetValue(Options.Input);
-        if (parseResult.GetValue(Options.Stdin)) input = Console.ReadLine();
+        List<string> inputs = [];
+        if (parseResult.GetValue(Options.Input) is { } inputOption) inputs.Add(inputOption);
+        inputs.AddRange(parseResult.GetValue(Options.Paths) ?? []);
+        bool readStdin = parseResult.GetValue(Options.Stdin);
+        if (inputs.Count == 0 && readStdin) inputs = NextStdinInput();
 
         ulong chainId = parseResult.GetValue(Options.GnosisTest) ? GnosisSpecProvider.Instance.ChainId : MainnetSpecProvider.Instance.ChainId;
         bool jsonOutput = parseResult.GetValue(Options.JsonOutput);
@@ -161,6 +192,7 @@ internal class Program
         bool enableWarmup = parseResult.GetValue(Options.EnableWarmup);
         bool? parallelExecution = parseResult.GetValue(Options.ParallelExecution);
         bool? batchRead = parseResult.GetValue(Options.BatchRead);
+        bool balReport = parseResult.GetValue(Options.BalReport);
 
         // Set before any fixture is loaded: the parse workers only ever read the table.
         ForkAliases.Set(parseResult.GetValue(Options.ForkAlias) ?? []);
@@ -181,9 +213,10 @@ internal class Program
             ThreadPool.SetMinThreads(desiredMin, desiredMinIO);
         }
 
-        while (!string.IsNullOrWhiteSpace(input))
+        while (inputs.Count > 0)
         {
-            List<string> files = CollectFiles(input, chunk);
+            List<string>? files = CollectFiles(inputs, chunk);
+            if (files is null) return 1;
 
             if (isEngineTest || isBlockTest)
             {
@@ -198,7 +231,8 @@ internal class Program
                     JsonOutput: true,
                     SuppressOutput: true,
                     ParallelExecution: parallelExecution,
-                    ParallelExecutionBatchRead: batchRead);
+                    ParallelExecutionBatchRead: batchRead,
+                    BlockAccessListExecutionObserver: balReport ? new BlockAccessListExecutionReport(Console.Error) : null);
                 List<EthereumTestResult> results = await RunBlockTestFiles(files, runnerOptions, workers);
                 resultsOut.Write(_serializer.Serialize(results, true));
             }
@@ -218,8 +252,8 @@ internal class Program
                 resultsOut.Write(_serializer.Serialize(results, true));
             }
 
-            if (!parseResult.GetValue(Options.Stdin)) break;
-            input = Console.ReadLine();
+            if (!readStdin) break;
+            inputs = NextStdinInput();
         }
 
         if (parseResult.GetValue(Options.Wait)) Console.ReadLine();
@@ -227,26 +261,55 @@ internal class Program
         return 0;
     }
 
-    private static List<string> CollectFiles(string path, string? chunk = null)
+    /// <summary>Reads the next path from stdin; an empty list once stdin ends or yields a blank line.</summary>
+    private static List<string> NextStdinInput() =>
+        Console.ReadLine() is { } line && !string.IsNullOrWhiteSpace(line) ? [line] : [];
+
+    /// <summary>
+    /// Expands the paths to their fixture files; null when any path does not exist or cannot be read,
+    /// after naming each such path on stderr.
+    /// </summary>
+    private static List<string>? CollectFiles(List<string> paths, string? chunk = null)
     {
         List<string> result = [];
-        if (File.Exists(path))
+        bool allReadable = true;
+        foreach (string path in paths)
         {
-            result.Add(path);
-        }
-        else if (Directory.Exists(path))
-        {
-            foreach (string file in Directory.GetFiles(path, "*.json", SearchOption.AllDirectories))
+            try
             {
-                if (!file.Contains("/.meta/") && !file.Contains("\\.meta\\"))
-                    result.Add(file);
-            }
+                if (File.Exists(path))
+                {
+                    File.OpenRead(path).Dispose();
+                    result.Add(path);
+                }
+                else if (Directory.Exists(path))
+                {
+                    List<string> directoryFiles = [];
+                    foreach (string file in Directory.GetFiles(path, "*.json", SearchOption.AllDirectories))
+                    {
+                        if (!file.Contains("/.meta/") && !file.Contains("\\.meta\\"))
+                            directoryFiles.Add(file);
+                    }
 
-            // Sorted before chunking so every chunk job sees the same order and the
-            // interleaved NofM partition is deterministic across CI jobs.
-            result.Sort(StringComparer.Ordinal);
+                    // Sorted before chunking so every chunk job sees the same order and the
+                    // interleaved NofM partition is deterministic across CI jobs.
+                    directoryFiles.Sort(StringComparer.Ordinal);
+                    result.AddRange(directoryFiles);
+                }
+                else
+                {
+                    Console.Error.WriteLine($"Fixture path does not exist: {path}");
+                    allReadable = false;
+                }
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                Console.Error.WriteLine($"Fixture path cannot be read: {path} - {ex.Message}");
+                allReadable = false;
+            }
         }
 
+        if (!allReadable) return null;
         return string.IsNullOrEmpty(chunk) ? result : [.. TestChunkFilter.FilterByChunk(result, chunk)];
     }
 
@@ -295,7 +358,7 @@ internal class Program
                 {
                     string name = Path.GetFileNameWithoutExtension(file);
                     WriteFileExceptionStatus(name, ex);
-                    allResults.Add(new EthereumTestResult(name, ex.ToString()));
+                    allResults.Add(new EthereumTestResult(name, ex.ToString()) { Rejections = [] });
                 }
             }
             return allResults;
@@ -324,7 +387,7 @@ internal class Program
                 {
                     string name = Path.GetFileNameWithoutExtension(item.file);
                     WriteFileExceptionStatus(name, ex);
-                    resultsByFile[item.index] = [new EthereumTestResult(name, ex.ToString())];
+                    resultsByFile[item.index] = [new EthereumTestResult(name, ex.ToString()) { Rejections = [] }];
                 }
             });
 
