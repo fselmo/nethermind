@@ -5,7 +5,9 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using System.Text;
+using System.Linq;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using Ethereum.Test.Base;
@@ -120,6 +122,20 @@ public class BlockchainTestJsonOutputTests
         (string stdout, string stderr) = await RunNethtestWithArgs(command, first, second, "--jsonout", "--neverTrace");
 
         Assert.That(ResultNames(stdout), Is.EquivalentTo(new[] { "more_than_8_differences", "one_block" }), $"stderr was: {Trim(stderr)}");
+    }
+
+    [Test]
+    public async Task Each_result_is_named_by_its_full_fixture_key([Values("blocktest", "enginetest")] string command)
+    {
+        string[] keys =
+        [
+            "tests/paris/first/test_one.py::test_same_name[fork_Paris-blockchain_test]",
+            "tests/paris/second/test_two.py::test_same_name[fork_Paris-blockchain_test]",
+        ];
+        string fixture = command == "blocktest" ? WriteOneBlockFixture().Path : WriteEngineFixture("clean_engine", []);
+        (string stdout, string stderr) = await RunNethtest(RewriteUnderKeys(fixture, keys), command);
+
+        Assert.That(ResultNames(stdout), Is.EquivalentTo(keys), $"stderr was: {Trim(stderr)}");
     }
 
     [Test]
@@ -356,6 +372,20 @@ public class BlockchainTestJsonOutputTests
             """);
 
         return file;
+    }
+
+    /// <summary>Rewrites a one-test fixture file so the same test appears once under each of <paramref name="keys"/>.</summary>
+    private static string RewriteUnderKeys(string fixture, string[] keys)
+    {
+        JsonNode test = JsonNode.Parse(File.ReadAllText(fixture))!.AsObject().Single().Value!;
+        JsonObject renamed = [];
+        foreach (string key in keys)
+        {
+            renamed[key] = test.DeepClone();
+        }
+
+        File.WriteAllText(fixture, renamed.ToJsonString());
+        return fixture;
     }
 
     /// <summary>Writes a Berlin state test with one value transfer; whether it passes does not matter here.</summary>
