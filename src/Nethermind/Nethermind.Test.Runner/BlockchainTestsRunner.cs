@@ -65,6 +65,10 @@ public class BlockchainTestsRunner(in BlockchainTestsRunnerOptions options, ITes
             if (result is null)
                 continue;
 
+            // Short names repeat across modules, so each result is reported under its fixture's full key.
+            if (loadedTest is BlockchainTest { FixtureId: not null } blockchainTest)
+                result.Name = blockchainTest.FixtureId;
+
             testResults.Add(result);
             ReportResult(result);
         }
