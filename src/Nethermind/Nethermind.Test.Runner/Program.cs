@@ -10,6 +10,7 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Ethereum.Test.Base;
+using Nethermind.Config;
 using Nethermind.Core.Test;
 using Nethermind.Crypto;
 using Nethermind.Serialization.Json;
@@ -90,6 +91,10 @@ internal class Program
         public static Option<bool?> BatchRead { get; } =
             new("--batchRead") { Description = "Force BAL batch-read prewarming on or off; when omitted, the client config default is used. [Only for Blockchain/Engine Test]" };
 
+        public static Option<PreWarmMode?> PreWarming { get; } =
+            new Option<PreWarmMode?>("--preWarming") { Description = "Run the block prewarmer, and the precompile and state caches it brings, as nodes do by default (Block), or leave it off (None); when omitted, it is off. [Only for Blockchain/Engine Test]" }
+                .AcceptOnlyFromAmong(nameof(PreWarmMode.None), nameof(PreWarmMode.Block));
+
         public static Option<bool> BalReport { get; } =
             new("--bal-report") { Description = "Print a JSON line on stderr naming the executor (parallel or sequential) that ran each block, and one when a block the parallel executor rejected is re-run sequentially. [Only for Blockchain/Engine Test]" };
 
@@ -124,6 +129,7 @@ internal class Program
             Options.TrieDb,
             Options.ParallelExecution,
             Options.BatchRead,
+            Options.PreWarming,
             Options.BalReport,
             Options.ForkAlias,
         ];
@@ -192,6 +198,7 @@ internal class Program
         bool enableWarmup = parseResult.GetValue(Options.EnableWarmup);
         bool? parallelExecution = parseResult.GetValue(Options.ParallelExecution);
         bool? batchRead = parseResult.GetValue(Options.BatchRead);
+        PreWarmMode? preWarming = parseResult.GetValue(Options.PreWarming);
         bool balReport = parseResult.GetValue(Options.BalReport);
 
         // Set before any fixture is loaded: the parse workers only ever read the table.
@@ -232,6 +239,7 @@ internal class Program
                     SuppressOutput: true,
                     ParallelExecution: parallelExecution,
                     ParallelExecutionBatchRead: batchRead,
+                    PreWarming: preWarming,
                     BlockAccessListExecutionObserver: balReport ? new BlockAccessListExecutionReport(Console.Error) : null);
                 List<EthereumTestResult> results = await RunBlockTestFiles(files, runnerOptions, workers);
                 resultsOut.Write(_serializer.Serialize(results, true));
