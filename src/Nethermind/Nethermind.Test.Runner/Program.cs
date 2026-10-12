@@ -99,7 +99,7 @@ internal class Program
             new("--bal-report") { Description = "Print a JSON line on stderr naming the executor (parallel or sequential) that ran each block, and one when a block the parallel executor rejected is re-run sequentially. [Only for Blockchain/Engine Test]" };
 
         public static Option<string[]> ForkAlias { get; } =
-            new("--forkAlias") { Description = "Resolve a fixture's declared fork name as another fork, e.g. 'Bogota=Eip8141Prototype'. Repeatable; needed where separate fixture releases give one fork name incompatible meanings.", AllowMultipleArgumentsPerToken = true };
+            new("--forkAlias") { Description = "Resolve a fixture's declared fork name as another fork, e.g. 'Bogota=Eip8141Prototype'. Repeat the option for more than one alias; needed where separate fixture releases give one fork name incompatible meanings." };
     }
 
     private static readonly IJsonSerializer _serializer = new EthereumJsonSerializer();
