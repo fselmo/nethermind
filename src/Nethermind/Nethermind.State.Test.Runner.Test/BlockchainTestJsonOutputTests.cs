@@ -139,6 +139,14 @@ public class BlockchainTestJsonOutputTests
     }
 
     [Test]
+    public async Task Path_argument_after_a_fork_alias_still_runs()
+    {
+        (string stdout, string stderr) = await RunNethtestWithArgs("blocktest", "--forkAlias", "Unused=Prague", WriteFixture(), "--jsonout", "--neverTrace");
+
+        Assert.That(ResultNames(stdout), Is.EquivalentTo(new[] { "more_than_8_differences" }), $"stderr was: {Trim(stderr)}");
+    }
+
+    [Test]
     public async Task Input_option_runs_together_with_path_arguments()
     {
         string directory = Path.Combine(_directory, "directory");
