@@ -117,6 +117,28 @@ public class BlockchainTestJsonOutputTests
     }
 
     [Test]
+    public async Task Bal_report_prints_one_execution_line_per_block([Values("blocktest", "--blockTest")] string testType)
+    {
+        (string fixture, string blockHash) = WriteOneBlockFixture();
+        (string stdout, string stderr) = await RunNethtest(fixture, testType, "--bal-report");
+
+        Assert.That(ResultCount(stdout), Is.EqualTo(1), $"stdout was: {Trim(stdout)}");
+        Assert.That(EventLines(stderr), Is.EqualTo(new[]
+        {
+            $$"""{"event":"balExecution","block":1,"hash":"{{blockHash}}","path":"sequential","reason":"pre-amsterdam"}""",
+        }), $"stderr was: {Trim(stderr)}");
+    }
+
+    [Test]
+    public async Task Without_bal_report_no_event_line_is_printed()
+    {
+        (string stdout, string stderr) = await RunNethtest(WriteOneBlockFixture().Path, "blocktest");
+
+        Assert.That(ResultCount(stdout), Is.EqualTo(1), $"stdout was: {Trim(stdout)}");
+        Assert.That(EventLines(stderr), Is.Empty, $"stderr was: {Trim(stderr)}");
+    }
+
+    [Test]
     public async Task Every_path_argument_runs_in_one_results_array([Values("blocktest", "enginetest")] string command)
     {
         string first = WriteFixture();
@@ -294,6 +316,49 @@ public class BlockchainTestJsonOutputTests
         }
     }
 
+    // An EEST fixture whose block access list carries an entry the block never produces. The header commits to that
+    // list, so it is delivered and judged during execution: the parallel executor rejects it and the sequential retry
+    // rejects it again, or, under --bal-sequential, the sequential executor rejects it once. Under --bal-withhold the
+    // block executes without it, and the list the client builds does not match the header.
+    [TestCase("blocktest", null)]
+    [TestCase("blocktest", "--bal-sequential")]
+    [TestCase("blocktest", "--bal-withhold")]
+    [TestCase("enginetest", null)]
+    [TestCase("enginetest", "--bal-sequential")]
+    public async Task A_corrupted_access_list_is_rejected_by_either_executor(string command, string executorFlag)
+    {
+        string fixture = Path.Combine(AppContext.BaseDirectory, "Fixtures", $"bal_invalid_surplus_system_address_{command}.json");
+        (string stdout, string stderr) = await RunNethtest(fixture, command, executorFlag is null ? ["--bal-report"] : ["--bal-report", executorFlag]);
+        string[] expectedEvents = executorFlag switch
+        {
+            null => ["balExecution parallel", "balFallback invalid"],
+            "--bal-sequential" => ["balExecution sequential disabled"],
+            "--bal-withhold" => ["balExecution sequential withheld"],
+            _ => throw new ArgumentOutOfRangeException(nameof(executorFlag))
+        };
+
+        JsonElement result = SingleResult(stdout);
+        string[] events = Array.ConvertAll(EventLines(stderr), static line =>
+        {
+            using JsonDocument document = JsonDocument.Parse(line);
+            JsonElement root = document.RootElement;
+            return root.GetProperty("event").GetString() == "balExecution"
+                ? $"balExecution {root.GetProperty("path").GetString()} {root.GetProperty("reason").GetString()}".TrimEnd()
+                : $"balFallback {root.GetProperty("sequentialResult").GetString()}";
+        });
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(result.GetProperty("pass").GetBoolean(), Is.True, $"stdout was: {Trim(stdout)}");
+            Assert.That(result.GetProperty("rejections").GetArrayLength(), Is.EqualTo(1), $"stdout was: {Trim(stdout)}");
+            Assert.That(events, Is.EqualTo(expectedEvents), $"stderr was: {Trim(stderr)}");
+        }
+
+        if (command == "enginetest")
+        {
+            Assert.That(result.GetProperty("lastPayloadStatus").GetString(), Is.EqualTo("INVALID"));
+        }
+    }
+
     /// <summary>Parses a results array holding exactly one result.</summary>
     private static JsonElement SingleResult(string stdout)
     {
@@ -313,6 +378,9 @@ public class BlockchainTestJsonOutputTests
 
         return names;
     }
+
+    private static string[] EventLines(string stderr) =>
+        Array.FindAll(stderr.Split('\n', StringSplitOptions.RemoveEmptyEntries), static line => line.StartsWith("{\"event\""));
 
     private static int ResultCount(string stdout)
     {
