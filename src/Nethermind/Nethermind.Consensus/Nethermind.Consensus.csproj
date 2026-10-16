@@ -10,6 +10,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="Ethereum.Test.Base" />
     <InternalsVisibleTo Include="Nethermind.Blockchain.Test" />
     <PackageReference Include="Collections.Pooled" />
   </ItemGroup>
