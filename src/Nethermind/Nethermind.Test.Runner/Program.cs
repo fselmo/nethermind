@@ -359,7 +359,7 @@ internal class Program
     }
 
     /// <summary>Runs every file's block or engine tests.</summary>
-    /// <returns>The results, and whether every file could be loaded; one that could not is a failed result.</returns>
+    /// <returns>The results, and whether every file could be loaded; one that could not is reported on stderr instead.</returns>
     private static async Task<(List<EthereumTestResult> Results, bool AllFilesLoaded)> RunBlockTestFiles(
         List<string> files, BlockchainTestsRunnerOptions baseOptions, int workers)
     {
@@ -382,13 +382,13 @@ internal class Program
             return null;
         }
 
-        void WriteFileExceptionStatus(string name, Exception ex)
+        void WriteFileExceptionStatus(string file, Exception ex)
         {
-            // A traced run reserves stderr for the JSONL trace; the failure still lands in the results document.
+            // A traced run reserves stderr for the JSONL trace, so there the failure shows only in the exit status.
             if (baseOptions.Trace)
                 return;
 
-            Console.Error.WriteLine($"\x1b[31mEXCEPTION\x1b[0m {UpdateProgress(true)} {name} - {ex.Message}");
+            Console.Error.WriteLine($"\x1b[31mEXCEPTION\x1b[0m {UpdateProgress(true)} {file} - {ex.Message}");
             Console.Error.Flush();
         }
 
@@ -410,9 +410,7 @@ internal class Program
                 catch (Exception ex)
                 {
                     unloadedFiles++;
-                    string name = Path.GetFileNameWithoutExtension(file);
-                    WriteFileExceptionStatus(name, ex);
-                    allResults.Add(new EthereumTestResult(name, ex.ToString()) { Rejections = [] });
+                    WriteFileExceptionStatus(file, ex);
                 }
             }
             return (allResults, unloadedFiles == 0);
@@ -441,9 +439,8 @@ internal class Program
                 catch (Exception ex)
                 {
                     Interlocked.Increment(ref unloadedFiles);
-                    string name = Path.GetFileNameWithoutExtension(item.file);
-                    WriteFileExceptionStatus(name, ex);
-                    resultsByFile[item.index] = [new EthereumTestResult(name, ex.ToString()) { Rejections = [] }];
+                    WriteFileExceptionStatus(item.file, ex);
+                    resultsByFile[item.index] = [];
                 }
             });
 

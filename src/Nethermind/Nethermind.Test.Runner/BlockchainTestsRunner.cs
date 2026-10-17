@@ -59,7 +59,7 @@ public class BlockchainTestsRunner(in BlockchainTestsRunnerOptions options, ITes
     {
     }
 
-    /// <summary>Whether <see cref="RunTestsAsync"/> met a fixture file it could not load, which it reports as a failed result.</summary>
+    /// <summary>Whether <see cref="RunTestsAsync"/> met a fixture file it could not load, which it reports on stderr and leaves out of the results.</summary>
     internal bool LoadFailed { get; private set; }
 
     public async Task<IEnumerable<EthereumTestResult>> RunTestsAsync()
@@ -102,7 +102,8 @@ public class BlockchainTestsRunner(in BlockchainTestsRunnerOptions options, ITes
         if (loadedTest is FailedToLoadTest)
         {
             LoadFailed = true;
-            return new EthereumTestResult(loadedTest.Name, loadedTest.LoadFailure) { Rejections = [] };
+            ReportResult(new EthereumTestResult(loadedTest.Name, loadedTest.LoadFailure) { Rejections = [] });
+            return null;
         }
 
         if (loadedTest is not BlockchainTest test)
