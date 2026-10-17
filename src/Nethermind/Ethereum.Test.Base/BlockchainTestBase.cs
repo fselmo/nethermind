@@ -83,6 +83,12 @@ public abstract class BlockchainTestBase
     protected virtual IBlockAccessListExecutionReport? BlockAccessListExecutionObserver => null;
 
     /// <summary>
+    /// Override to judge an engine payload the fixture expects to be INVALID by its status alone, without matching the
+    /// client's validation error against the fixture's expected exception.
+    /// </summary>
+    protected virtual bool MatchExpectedExceptions => true;
+
+    /// <summary>
     /// Override to replace the log manager used by internal Nethermind components.
     /// Null means use the default (TestLogManager at Warn level).
     /// </summary>
@@ -316,7 +322,7 @@ public abstract class BlockchainTestBase
                 IJsonRpcService rpcService = container.Resolve<IJsonRpcService>();
                 JsonRpcUrl engineUrl = new(Uri.UriSchemeHttp, "localhost", 8551, RpcEndpoint.Http, true, ["engine"]);
                 JsonRpcContext rpcContext = new(RpcEndpoint.Http, url: engineUrl);
-                Result<string> payloadResult = await RunNewPayloads(test.EngineNewPayloads, rpcService, rpcContext, blockchainProcessingQueue, parentHeader.Hash!, engineWitnessDifferences, rejectionRecorder);
+                Result<string> payloadResult = await RunNewPayloads(test.EngineNewPayloads, rpcService, rpcContext, blockchainProcessingQueue, parentHeader.Hash!, engineWitnessDifferences, rejectionRecorder, MatchExpectedExceptions);
                 lastPayloadStatus = payloadResult.Data ?? "";
                 lastValidationError = payloadResult.Error;
             }
@@ -477,7 +483,7 @@ public abstract class BlockchainTestBase
     /// carried a validation error, that error in <see cref="Result{TData}.Error"/> (an expected
     /// rejection does not fail the test, so the status is still populated).
     /// </returns>
-    private static async Task<Result<string>> RunNewPayloads(TestEngineNewPayloadsJson[]? newPayloads, IJsonRpcService rpcService, JsonRpcContext rpcContext, IBlockProcessingQueue processingQueue, Hash256 initialHeadHash, List<string> witnessDifferences, RejectionRecorder rejectionRecorder)
+    private static async Task<Result<string>> RunNewPayloads(TestEngineNewPayloadsJson[]? newPayloads, IJsonRpcService rpcService, JsonRpcContext rpcContext, IBlockProcessingQueue processingQueue, Hash256 initialHeadHash, List<string> witnessDifferences, RejectionRecorder rejectionRecorder, bool matchExpectedExceptions)
     {
         if (newPayloads is null || newPayloads.Length == 0) return Result<string>.Success("");
 
@@ -531,7 +537,7 @@ public abstract class BlockchainTestBase
                     using NewPayloadWithWitnessV1Result witnessResult = GetWitnessResult(npResponse, newPayloadVersion);
                     PayloadStatusV1 payloadStatus = new() { Status = witnessResult.Status, ValidationError = witnessResult.ValidationError, LatestValidHash = witnessResult.LatestValidHash };
                     RecordInvalidPayload(rejectionRecorder, payloadIndex, enginePayload, payloadStatus);
-                    AssertPayloadStatus(payloadStatus, validationError, newPayloadVersion);
+                    AssertPayloadStatus(payloadStatus, validationError, newPayloadVersion, matchExpectedExceptions);
                     lastStatus = payloadStatus.Status;
                     if (payloadStatus.ValidationError is not null)
                         lastValidationError = payloadStatus.ValidationError;
@@ -555,7 +561,7 @@ public abstract class BlockchainTestBase
                 {
                     PayloadStatusV1 payloadStatus = GetPayloadStatus(npResponse, newPayloadVersion);
                     RecordInvalidPayload(rejectionRecorder, payloadIndex, enginePayload, payloadStatus);
-                    AssertPayloadStatus(payloadStatus, validationError, newPayloadVersion, enginePayload.InclusionListSatisfied);
+                    AssertPayloadStatus(payloadStatus, validationError, newPayloadVersion, matchExpectedExceptions, enginePayload.InclusionListSatisfied);
                     lastStatus = payloadStatus.Status;
                     if (payloadStatus.ValidationError is not null)
                         lastValidationError = payloadStatus.ValidationError;
@@ -683,7 +689,7 @@ public abstract class BlockchainTestBase
     private static void AssertPayloadWasNotExpectedToError(int? expectedErrorCode, string? validationError, int payloadVersion) =>
         Assert.That(DescribeMissingRpcError(expectedErrorCode, validationError, payloadVersion), Is.Null);
 
-    private static void AssertPayloadStatus(PayloadStatusV1 payloadStatus, string? expectedValidationError, int payloadVersion, bool? expectedInclusionListSatisfied = null)
+    private static void AssertPayloadStatus(PayloadStatusV1 payloadStatus, string? expectedValidationError, int payloadVersion, bool matchExpectedException, bool? expectedInclusionListSatisfied = null)
     {
         string expectedStatus = expectedValidationError is null ? PayloadStatus.Valid : PayloadStatus.Invalid;
         Assert.That(payloadStatus.Status, Is.EqualTo(expectedStatus), $"engine_newPayloadV{payloadVersion} returned {payloadStatus.Status}, expected {expectedStatus}. ValidationError: {payloadStatus.ValidationError}");
@@ -693,7 +699,7 @@ public abstract class BlockchainTestBase
             Assert.That((payloadStatus as PayloadStatusV2)?.InclusionListSatisfied, Is.EqualTo(expectedIlSatisfied),
                 $"engine_newPayloadV{payloadVersion} reported inclusionListSatisfied={(payloadStatus as PayloadStatusV2)?.InclusionListSatisfied}, expected {expectedIlSatisfied}");
 
-        if (expectedValidationError is not null)
+        if (expectedValidationError is not null && matchExpectedException)
             AssertValidationError(payloadStatus.ValidationError, expectedValidationError, payloadVersion);
     }
 
