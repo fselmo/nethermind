@@ -35,6 +35,8 @@ public class BlockchainTestsRunner(in BlockchainTestsRunnerOptions options, ITes
     protected override bool? ParallelExecutionBatchReadOverride => _parallelExecutionBatchRead;
     protected override bool WithholdBlockAccessLists => _withholdBlockAccessLists;
     protected override IBlockAccessListExecutionReport? BlockAccessListExecutionObserver => _blockAccessListExecutionObserver;
+    // A rejection's reason is the consumer's to judge, from the client error each result reports.
+    protected override bool MatchExpectedExceptions => false;
     private readonly ConsoleColor _defaultColor = Console.ForegroundColor;
     private readonly ITestSourceLoader? _testsSource = testsSource;
     private static readonly IJsonSerializer _serializer = new EthereumJsonSerializer();
