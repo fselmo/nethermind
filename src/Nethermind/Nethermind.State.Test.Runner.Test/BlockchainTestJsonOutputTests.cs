@@ -291,13 +291,15 @@ public class BlockchainTestJsonOutputTests
         }
     }
 
+    // The verdict only asks whether a rejection was expected, so an exception the client error does not match passes too.
     [Test]
-    public async Task Engine_test_reports_an_invalid_payload_and_a_json_rpc_error_by_payload_index()
+    public async Task Engine_test_reports_an_invalid_payload_and_a_json_rpc_error_by_payload_index(
+        [Values("BlockException.INVALID_BLOCK_NUMBER", "TransactionException.INSUFFICIENT_ACCOUNT_FUNDS")] string expectedException)
     {
         (string invalidPayload, string invalidBlockHash) = SkippedNumberPayload();
         string fixture = WriteEngineFixture("rejected_engine",
         [
-            $$"""{ "params": [{{invalidPayload}}], "newPayloadVersion": "1", "forkchoiceUpdatedVersion": "1", "validationError": "BlockException.INVALID_BLOCK_NUMBER" }""",
+            $$"""{ "params": [{{invalidPayload}}], "newPayloadVersion": "1", "forkchoiceUpdatedVersion": "1", "validationError": "{{expectedException}}" }""",
             // newPayloadV3 refuses a payload without the Shanghai and Cancun fields before validating it.
             $$"""{ "params": [{{invalidPayload}}, [], "{{Keccak.Zero}}"], "newPayloadVersion": "3", "forkchoiceUpdatedVersion": "1", "errorCode": "-32602" }""",
         ]);
