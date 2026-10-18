@@ -295,7 +295,8 @@ internal class Program
 
     /// <summary>
     /// Expands the paths to their fixture files. For block and engine tests, null when any path does not exist or
-    /// cannot be read, after naming each such path on stderr; other test types skip a missing path.
+    /// cannot be read, or any file found under a directory cannot be read, after naming each on stderr; other test
+    /// types skip a missing path.
     /// </summary>
     private static List<string>? CollectFiles(List<string> paths, string? chunk, bool failOnUnreadablePath)
     {
@@ -309,20 +310,21 @@ internal class Program
                 continue;
             }
 
+            if (!File.Exists(path) && !Directory.Exists(path))
+            {
+                Console.Error.WriteLine($"Fixture path does not exist: {path}");
+                allReadable = false;
+                continue;
+            }
+
             try
             {
-                if (File.Exists(path))
+                // A file found under a directory counts like a named one, so every file is opened before any runs.
+                foreach (string file in FixtureFiles(path))
                 {
-                    File.OpenRead(path).Dispose();
+                    if (CanRead(file)) result.Add(file);
+                    else allReadable = false;
                 }
-                else if (!Directory.Exists(path))
-                {
-                    Console.Error.WriteLine($"Fixture path does not exist: {path}");
-                    allReadable = false;
-                    continue;
-                }
-
-                result.AddRange(FixtureFiles(path));
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
@@ -333,6 +335,21 @@ internal class Program
 
         if (!allReadable) return null;
         return string.IsNullOrEmpty(chunk) ? result : [.. TestChunkFilter.FilterByChunk(result, chunk)];
+    }
+
+    /// <summary>Whether the fixture file can be opened; when it cannot, names it on stderr.</summary>
+    private static bool CanRead(string file)
+    {
+        try
+        {
+            File.OpenRead(file).Dispose();
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Console.Error.WriteLine($"Fixture path cannot be read: {file} - {ex.Message}");
+            return false;
+        }
     }
 
     private static List<string> FixtureFiles(string path)
