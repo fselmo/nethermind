@@ -6,6 +6,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Text;
 using System.Linq;
+using System.Runtime.Versioning;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading.Tasks;
@@ -202,6 +203,32 @@ public class BlockchainTestJsonOutputTests
             Assert.That(exitCode, Is.EqualTo(2));
             Assert.That(stdout, Is.Empty, "no fixture may run when any path is missing");
             Assert.That(stderr, Does.Contain(missing));
+        }
+    }
+
+    [Test]
+    [Platform(Exclude = "Win")]
+    [UnsupportedOSPlatform("windows")]
+    public async Task An_unreadable_fixture_file_is_an_error_before_anything_runs(
+        [Values("blocktest", "enginetest")] string command, [Values] bool foundInDirectory)
+    {
+        string directory = Path.Combine(_directory, "walk");
+        Directory.CreateDirectory(directory);
+        string good = Path.Combine(directory, "good.json");
+        File.Move(WriteFixture(), good);
+        string unreadable = Path.Combine(directory, "unreadable.json");
+        File.WriteAllText(unreadable, "{}");
+        File.SetUnixFileMode(unreadable, UnixFileMode.None);
+        Assume.That(() => File.OpenRead(unreadable).Dispose(), Throws.InstanceOf<UnauthorizedAccessException>(), "a superuser reads any file");
+
+        string[] paths = foundInDirectory ? [directory] : [good, unreadable];
+        (string stdout, string stderr, int exitCode) = await NethtestProcess.RunWithExitCode([command, .. paths, "--jsonout", "--neverTrace"]);
+
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(exitCode, Is.EqualTo(2));
+            Assert.That(stdout, Is.Empty, "no fixture may run when any file cannot be read");
+            Assert.That(stderr, Does.Contain(unreadable));
         }
     }
 
